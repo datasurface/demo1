@@ -63,15 +63,12 @@ dags:
     branch: main
     subPath: dags
     wait: 60
-    credentialsSecret: git-dags
-    credentialsSecretKey: token
+    credentialsSecret: git-dags  # Secret must have GITSYNC_USERNAME and GITSYNC_PASSWORD keys
 
-# Logs volume
+# Logs - disable persistence for Docker Desktop (local-path doesn't support RWX)
 logs:
   persistence:
-    enabled: true
-    storageClassName: standard
-    size: 2Gi
+    enabled: false
 
 config:
   logging:

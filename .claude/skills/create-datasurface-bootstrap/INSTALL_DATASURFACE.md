@@ -97,9 +97,12 @@ sudo kubectl create secret generic git \
   --from-literal=TOKEN=your-github-personal-access-token \
   -n $NAMESPACE
 
-# GitHub credentials (for DAG git-sync)
+# GitHub credentials (for DAG git-sync - both v3 and v4 key formats)
 sudo kubectl create secret generic git-dags \
-  --from-literal=token=your-github-personal-access-token \
+  --from-literal=GIT_SYNC_USERNAME=your-github-username \
+  --from-literal=GIT_SYNC_PASSWORD=your-github-personal-access-token \
+  --from-literal=GITSYNC_USERNAME=your-github-username \
+  --from-literal=GITSYNC_PASSWORD=your-github-personal-access-token \
   -n $NAMESPACE
 
 # DataTransformer credentials

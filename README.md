@@ -75,9 +75,12 @@ kubectl create secret generic git \
   --from-literal=TOKEN=$GITHUB_TOKEN \
   -n $NAMESPACE
 
-# Git credentials for DAG sync
+# Git credentials for DAG sync (both v3 and v4 key formats)
 kubectl create secret generic git-dags \
-  --from-literal=token=$GITHUB_TOKEN \
+  --from-literal=GIT_SYNC_USERNAME=$GITHUB_USERNAME \
+  --from-literal=GIT_SYNC_PASSWORD=$GITHUB_TOKEN \
+  --from-literal=GITSYNC_USERNAME=$GITHUB_USERNAME \
+  --from-literal=GITSYNC_PASSWORD=$GITHUB_TOKEN \
   -n $NAMESPACE
 ```
 
