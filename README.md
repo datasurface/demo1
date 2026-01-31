@@ -33,12 +33,30 @@ cd demo1
 
 ### Step 4: Customize the Model
 
-Edit `eco.py` to set your GitHub organization and repository names.
+**Edit `eco.py`:**
 
-Edit `rte_demo.py` to configure:
-- Namespace name
-- Database host (`host.docker.internal` for Docker Desktop)
-- Storage class (`standard` for Docker Desktop)
+```python
+GIT_REPO_OWNER: str = "yourorg"      # Your GitHub organization/username
+GIT_REPO_NAME: str = "your-repo"     # Your repository name
+```
+
+**Edit `rte_demo.py`:**
+
+```python
+# Docker Desktop configuration
+KUB_NAME_SPACE: str = "demo1"                    # Kubernetes namespace
+MERGE_HOST: str = "host.docker.internal"         # PostgreSQL host from K8s
+MERGE_DBNAME: str = "merge_db"                   # Merge database name
+
+# In createDemoPSP():
+git_config: GitCacheConfig = GitCacheConfig(
+    enabled=True,
+    access_mode="ReadWriteOnce",    # Single node = RWO
+    storageClass="standard"         # Docker Desktop storage class
+)
+
+pv_storage_class="standard"         # Docker Desktop storage class
+```
 
 ### Step 5: Create Kubernetes Namespace and Secrets
 
