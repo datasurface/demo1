@@ -74,6 +74,11 @@ kubectl create secret generic postgres \
 kubectl create secret generic git \
   --from-literal=TOKEN=$GITHUB_TOKEN \
   -n $NAMESPACE
+
+# Git credentials for DAG sync
+kubectl create secret generic git-dags \
+  --from-literal=token=$GITHUB_TOKEN \
+  -n $NAMESPACE
 ```
 
 ### Step 6: Install Airflow
@@ -103,14 +108,22 @@ docker run --rm \
   --psp Demo_PSP \
   --rte-name demo
 
-# Deploy DAG and run init jobs
-# (see generated_output/Demo_PSP/ for artifacts)
+# Copy DAG to dags folder and push (GitSync will pull automatically)
+cp generated_output/Demo_PSP/*_infrastructure_dag.py dags/
+git add dags/
+git commit -m "Add infrastructure DAG"
+git push
+
+# Apply init jobs
+kubectl apply -f generated_output/Demo_PSP/*_ring1_init_job.yaml
+kubectl apply -f generated_output/Demo_PSP/*_model_merge_job.yaml
 ```
 
 ## Project Structure
 
 ```
 .
+├── dags/                  # Airflow DAGs (GitSync pulls from here)
 ├── docker/
 │   └── postgres/          # PostgreSQL compose setup
 ├── helm/

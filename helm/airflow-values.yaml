@@ -53,13 +53,18 @@ dagProcessor:
 triggerer:
   enabled: true
 
-# Shared DAG volume
+# GitSync for DAGs - pulls from GitHub repository
 dags:
   persistence:
+    enabled: false
+  gitSync:
     enabled: true
-    storageClassName: standard
-    size: 1Gi
-    accessMode: ReadWriteOnce
+    repo: https://github.com/datasurface/demo1_airflow.git  # Change to your DAG repo
+    branch: main
+    subPath: dags
+    wait: 60
+    credentialsSecret: git-dags
+    credentialsSecretKey: token
 
 # Logs volume
 logs:

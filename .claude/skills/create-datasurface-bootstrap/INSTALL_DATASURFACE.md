@@ -97,6 +97,11 @@ sudo kubectl create secret generic git \
   --from-literal=TOKEN=your-github-personal-access-token \
   -n $NAMESPACE
 
+# GitHub credentials (for DAG git-sync)
+sudo kubectl create secret generic git-dags \
+  --from-literal=token=your-github-personal-access-token \
+  -n $NAMESPACE
+
 # DataTransformer credentials
 sudo kubectl create secret generic mask-dt-cred \
   --from-literal=USER=mask_dt_cred \
@@ -271,13 +276,18 @@ dagProcessor:
 triggerer:
   enabled: true
 
-# Shared DAG volume (ReadWriteMany required for multi-pod access)
+# GitSync for DAGs - pulls from GitHub repository
 dags:
   persistence:
+    enabled: false
+  gitSync:
     enabled: true
-    storageClassName: longhorn
-    size: 5Gi
-    accessMode: ReadWriteMany
+    repo: https://github.com/your-org/your-dag-repo.git
+    branch: main
+    subPath: dags
+    wait: 60
+    credentialsSecret: git-dags
+    credentialsSecretKey: token
 
 # Shared logs volume
 logs:
@@ -394,15 +404,24 @@ ls -la generated_output/Test_DP/
 scp generated_output/Test_DP/*.yaml kub-test:/tmp/
 ```
 
-### Step 5: Deploy Infrastructure DAG
+### Step 5: Deploy Infrastructure DAG via Git
 
-**Important:** For Helm deployments, copy to dag-processor (not scheduler):
+Push the generated DAG to your DAG repository. GitSync will automatically pull it.
 
 ```bash
-# Copy DAG to dag-processor's shared volume
-POD=$(sudo kubectl get pods -n $NAMESPACE -l component=dag-processor -o jsonpath='{.items[0].metadata.name}')
-sudo kubectl cp generated_output/Test_DP/test_dp_infrastructure_dag.py $POD:/opt/airflow/dags/ -n $NAMESPACE -c dag-processor
+# Create dags directory in your DAG repo
+mkdir -p dags
+
+# Copy generated DAG
+cp generated_output/Test_DP/test_dp_infrastructure_dag.py dags/
+
+# Commit and push
+git add dags/
+git commit -m "Add infrastructure DAG"
+git push
 ```
+
+GitSync polls every 60 seconds by default. DAGs will be available after the next sync.
 
 ### Step 6: Run Initialization Jobs
 
@@ -420,12 +439,16 @@ sudo kubectl apply -f /tmp/test_dp_reconcile_views_job.yaml
 sudo kubectl wait --for=condition=complete job/test-dp-reconcile-views-job -n $NAMESPACE --timeout=300s
 ```
 
-### Step 7: Restart Airflow to Load DAGs
+### Step 7: Wait for GitSync to Pull DAGs
+
+GitSync automatically pulls DAGs every 60 seconds. Wait for the sync to complete:
 
 ```bash
+# Check git-sync container logs
+sudo kubectl logs deployment/airflow-scheduler -n $NAMESPACE -c git-sync --tail=20
+
+# Or force a restart if needed
 sudo kubectl rollout restart deployment airflow-scheduler airflow-dag-processor -n $NAMESPACE
-sudo kubectl rollout status deployment airflow-scheduler -n $NAMESPACE --timeout=120s
-sudo kubectl rollout status deployment airflow-dag-processor -n $NAMESPACE --timeout=120s
 ```
 
 ## Phase 6: Verify Deployment
@@ -514,16 +537,14 @@ docker run --rm \
   --psp Test_DP \
   --rte-name prod
 
-# Copy to remote
-scp generated_output/Test_DP/test_dp_infrastructure_dag.py kub-test:/tmp/
-
-# Deploy to dag-processor
-ssh kub-test "
-  POD=\$(sudo kubectl get pods -n $NAMESPACE -l component=dag-processor -o jsonpath='{.items[0].metadata.name}')
-  sudo kubectl cp /tmp/test_dp_infrastructure_dag.py \$POD:/opt/airflow/dags/ -n $NAMESPACE -c dag-processor
-  sudo kubectl rollout restart deployment airflow-scheduler airflow-dag-processor -n $NAMESPACE
-"
+# Deploy via git (in your DAG repository)
+cp generated_output/Test_DP/test_dp_infrastructure_dag.py dags/
+git add dags/
+git commit -m "Update infrastructure DAG"
+git push
 ```
+
+GitSync will automatically pull the updated DAG within 60 seconds. No restart required.
 
 ### Step 4: Re-run Model Merge (if table schema changed)
 
@@ -1135,7 +1156,8 @@ PGPASSWORD=password psql -h $PG_HOST -U postgres -d merge_db_af3 -c "
 | Check pods | `sudo kubectl get pods -n yp-airflow3` |
 | Check DAG loading | `sudo kubectl logs deployment/airflow-dag-processor -n yp-airflow3 --tail=50 \| grep '# DAGs'` |
 | Restart Airflow | `sudo kubectl rollout restart deployment airflow-scheduler airflow-dag-processor -n yp-airflow3` |
-| Copy DAG file | `sudo kubectl cp dag.py $(kubectl get pods -n yp-airflow3 -l component=dag-processor -o jsonpath='{.items[0].metadata.name}'):/opt/airflow/dags/ -n yp-airflow3 -c dag-processor` |
+| Deploy DAG | `git add dags/ && git commit -m "Update DAG" && git push` (GitSync pulls automatically) |
+| Check GitSync | `sudo kubectl logs deployment/airflow-scheduler -n yp-airflow3 -c git-sync --tail=20` |
 | Database access | `PGPASSWORD=password psql -h $PG_HOST -U postgres -d merge_db_af3` |
 | View job logs | `sudo kubectl logs job/test-dp-model-merge-job -n yp-airflow3` |
 | Check ingestion data | `PGPASSWORD=password psql -h $PG_HOST -U postgres -d merge_db_af3 -c "SELECT COUNT(*) FROM scd1_store1_customers_m;"` |
