@@ -1,169 +1,107 @@
-# Introduction
+# DataSurface Bootstrap
 
-This project configures a basic yellow system with no model objects except a demo RTE defined. It is designed to run on a docker desktop installation with kubernetes enabled OR a kubernetes cluster. It requires a postgres database to be available.
-
-It can be used with github model repositories.
-
-## Datasurface artifacts
-
-# Customer Artifact Access
-
-This guide explains how to configure access to DataSurface Docker images and Python modules. For a quick start, see **[Installation and Setup](100_InstallationAndSetup.md)**.
+A template for bootstrapping a DataSurface Yellow environment on Docker Desktop with Kubernetes.
 
 ## Prerequisites
 
-You will receive the following credentials from DataSurface:
+- Docker Desktop with Kubernetes enabled
+- Python 3.12+
+- `kubectl` and `helm` CLI tools
+- GitHub account with access to create repositories
 
-- **Username**: Your deploy token username (e.g., `customer-acme`)
-- **Token**: Your deploy token value
-- **Project ID**: `77796931`
+## Quick Start
 
-## Docker Images
-
-### Available Images
-
-- `registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}` — Core DataSurface image
-- `registry.gitlab.com/datasurface-inc/datasurface/datasurface-dbt:v${DATASURFACE_VERSION}` — DataSurface with dbt support
-
-### Local Docker Pull
+### Step 1: Start PostgreSQL
 
 ```bash
-# Login to GitLab registry (one-time)
-docker login registry.gitlab.com -u <username> -p <token>
-
-# Pull images
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface-dbt:v${DATASURFACE_VERSION}
+cd docker/postgres
+docker compose up -d
 ```
 
-### Kubernetes Configuration
+This creates `airflow_db` and `merge_db` databases.
 
-Create an image pull secret:
+### Step 2: Fork This Repository
+
+Fork this template to your own GitHub repository (e.g., `https://github.com/yourorg/demo1.git`).
+
+### Step 3: Clone Your Fork
 
 ```bash
-kubectl create secret docker-registry datasurface-registry \
-  --docker-server=registry.gitlab.com \
-  --docker-username=<username> \
-  --docker-password=<token> \
-  -n <namespace>
+git clone https://github.com/yourorg/demo1.git
+cd demo1
 ```
 
-Reference the secret in your pods or deployments:
+### Step 4: Customize the Model
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: datasurface-pod
-spec:
-  imagePullSecrets:
-    - name: datasurface-registry
-  containers:
-    - name: datasurface
-      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-```
+Edit `eco.py` to set your GitHub organization and repository names.
 
-For Helm charts, add to your values:
+Edit `rte_demo.py` to configure:
+- Namespace name
+- Database host (`host.docker.internal` for Docker Desktop)
+- Storage class (`standard` for Docker Desktop)
 
-```yaml
-imagePullSecrets:
-  - name: datasurface-registry
-
-image:
-  repository: registry.gitlab.com/datasurface-inc/datasurface/datasurface
-  tag: v${DATASURFACE_VERSION}
-```
-
-## Python Module
-
-### Install with pip
+### Step 5: Create Kubernetes Namespace and Secrets
 
 ```bash
-pip install datasurface \
-  --index-url https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
+export NAMESPACE="demo1"
+kubectl create namespace $NAMESPACE
+
+# PostgreSQL credentials
+kubectl create secret generic postgres \
+  --from-literal=USER=postgres \
+  --from-literal=PASSWORD=password \
+  -n $NAMESPACE
+
+# Git credentials for model repository
+kubectl create secret generic git \
+  --from-literal=TOKEN=$GITHUB_TOKEN \
+  -n $NAMESPACE
 ```
 
-### Install a Specific Version
+### Step 6: Install Airflow
 
 ```bash
-pip install datasurface==${DATASURFACE_VERSION} \
-  --index-url https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
+helm repo add apache-airflow https://airflow.apache.org
+helm repo update
+
+helm install airflow apache-airflow/airflow \
+  -f helm/airflow-values.yaml \
+  -n $NAMESPACE \
+  --timeout 10m
 ```
 
-### Configure pip.conf
-
-For persistent configuration, add to `~/.pip/pip.conf` (Linux/macOS) or `%APPDATA%\pip\pip.ini` (Windows):
-
-```ini
-[global]
-extra-index-url = https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
-```
-
-### Requirements File
-
-Add the index URL to your `requirements.txt`:
-
-```
---extra-index-url https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
-datasurface==${DATASURFACE_VERSION}
-```
-
-### Environment Variable (CI/CD)
-
-For CI/CD pipelines, set credentials as environment variables:
+### Step 7: Generate and Deploy Bootstrap
 
 ```bash
-export PIP_INDEX_URL="https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-pip install datasurface
+# Generate bootstrap artifacts
+docker run --rm \
+  -v "$(pwd)":/workspace/model \
+  -w /workspace/model \
+  datasurface/datasurface:latest \
+  python -m datasurface.cmd.platform generatePlatformBootstrap \
+  --ringLevel 0 \
+  --model /workspace/model \
+  --output /workspace/model/generated_output \
+  --psp Demo_PSP \
+  --rte-name demo
+
+# Deploy DAG and run init jobs
+# (see generated_output/Demo_PSP/ for artifacts)
 ```
 
-## Optional Dependencies
+## Project Structure
 
-The base `datasurface` package works on both AMD64 and ARM64. For DB2 support (AMD64 only):
-
-```bash
-pip install datasurface[db2] \
-  --index-url https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
+```
+.
+├── docker/
+│   └── postgres/          # PostgreSQL compose setup
+├── helm/
+│   └── airflow-values.yaml  # Airflow Helm values for Docker Desktop
+├── eco.py                 # Ecosystem definition
+├── rte_demo.py           # Runtime environment configuration
+└── README.md
 ```
 
-## Version Requirements
+## DataSurface Artifacts
 
-- Python >= 3.12, this is due to sqlserver and snowflake dependencies.
-
-## Troubleshooting
-
-### Authentication Failed
-
-Verify your credentials:
-
-```bash
-# Test Docker login
-docker login registry.gitlab.com -u <username> -p <token>
-
-# Test PyPI access (should list available versions)
-pip index versions datasurface \
-  --index-url https://<username>:<token>@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
-```
-
-### Token Expired
-
-Contact DataSurface support to renew your access token.
-
-### Wrong Python Version
-
-DataSurface requires Python 3.12 or higher:
-
-```bash
-python --version  # Should show 3.12.x or higher
-```
-
-## Security Notes
-
-- Do not commit tokens to version control
-- Use environment variables or secrets management in CI/CD
-- Rotate tokens periodically
-- Report any suspected token compromise immediately
-
----
-
-**Previous**: [Installation and Setup](100_InstallationAndSetup.md) | **Next**: [Git and Repository Management](200_GitAndRepositoryManagement.md)
+See [ARTIFACTS.md](ARTIFACTS.md) for accessing DataSurface Docker images and Python modules.

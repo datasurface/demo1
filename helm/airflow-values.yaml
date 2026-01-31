@@ -1,0 +1,82 @@
+# Airflow Helm Values for Docker Desktop Kubernetes
+# Adapted from INSTALL_DATASURFACE.md for local development
+
+executor: CeleryExecutor
+
+# Airflow version
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "3.1.6"
+
+# External PostgreSQL (running in Docker, accessible via host.docker.internal)
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: postgres
+    pass: password
+    protocol: postgresql
+    host: host.docker.internal
+    port: 5432
+    db: airflow_db
+
+# Redis for Celery broker
+redis:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: standard
+
+# Single scheduler for local dev
+scheduler:
+  replicas: 1
+
+# Single worker for local dev
+workers:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClassName: standard
+
+# API server with NodePort for local access
+apiServer:
+  service:
+    type: NodePort
+
+# DAG processor
+dagProcessor:
+  enabled: true
+
+# Triggerer for async sensors
+triggerer:
+  enabled: true
+
+# Shared DAG volume
+dags:
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 1Gi
+    accessMode: ReadWriteOnce
+
+# Logs volume
+logs:
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 2Gi
+
+config:
+  logging:
+    delete_local_logs: "False"
+  scheduler:
+    dag_dir_list_interval: "60"
+
+# Web UI credentials
+webserver:
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin

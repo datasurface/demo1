@@ -164,6 +164,9 @@ cython_debug/
 # VS Code
 .vscode/
 
+# Local working directories
+tmp/
+
 # macOS
 .DS_Store
 .AppleDouble
