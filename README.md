@@ -10,6 +10,19 @@ A template for bootstrapping a DataSurface Yellow environment on Docker Desktop 
 
 ## Quick Start
 
+This guide walks you through the following:
+
+* Setup a postgres database container for datasurface to use
+* Clone this repository containing the bootstrap model and modify it as needed, then push the customized model to a new repository, lets call it 'demo_actual'.
+* Create a gitsync repository called demo_gitsync which is just for DAGs for our future airflow
+
+* Create the database server and databases
+* Install helm with correct values and use gitsync against demo_gitsync
+
+* Use demo_actual's customized model to generate the bootstrap artifacts
+* Push the generated DAG files to demo_gitsync
+
+
 ### Step 1: Start PostgreSQL
 
 ```bash
@@ -79,8 +92,10 @@ docker run --rm \
   --psp Demo_PSP \
   --rte-name demo
 
-# Copy DAG to dags folder and push (GitSync will pull automatically)
-cp generated_output/Demo_PSP/*_infrastructure_dag.py dags/
+# Push DAG to your gitsync repository
+cd /path/to/demo_gitsync
+mkdir -p dags
+cp /path/to/demo_actual/generated_output/Demo_PSP/*_infrastructure_dag.py dags/
 git add dags/
 git commit -m "Add infrastructure DAG"
 git push
@@ -94,7 +109,6 @@ kubectl apply -f generated_output/Demo_PSP/*_model_merge_job.yaml
 
 ```
 .
-├── dags/                  # Airflow DAGs (GitSync pulls from here)
 ├── docker/
 │   └── postgres/          # PostgreSQL compose setup
 ├── helm/
