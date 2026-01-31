@@ -1,0 +1,21 @@
+stages:
+  - validate
+
+datasurface-mr-validator:
+  stage: validate
+  image: registry.gitlab.com/datasurface-inc/datasurface:latest
+  before_script:
+    - mkdir -p /workspace/main /workspace/mr
+    - cd /workspace/main && git clone --depth 1 --branch main "$CI_SERVER_URL/$CI_PROJECT_PATH.git" . || true
+    - cd /workspace/mr && git clone --depth 1 --branch "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "$CI_SERVER_URL/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH.git" . || true
+  script:
+    - python -m datasurface.handler.action /workspace/main /workspace/mr
+  only:
+    - merge_requests
+  environment:
+    name: validation
+  variables:
+    BASE_REPOSITORY: $CI_PROJECT_PATH
+    HEAD_REPOSITORY: $CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
+    HEAD_BRANCH: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+    GITHUB_TOKEN: $CI_JOB_TOKEN

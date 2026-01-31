@@ -1,0 +1,45 @@
+name: Pull Request Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  datasurface-pr-validator:
+    name: DataSurface PR Validator
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout PR code
+      uses: actions/checkout@v4
+      with:
+        # Must specify repository for fork-based PRs when using pull_request_target
+        # Without this, checkout looks for the SHA in the base repo where it doesn't exist
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.sha }}
+        path: pr
+
+    - name: Checkout main branch code
+      uses: actions/checkout@v4
+      with:
+        ref: 'main'
+        path: main
+
+    - name: Login to GitLab Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: registry.gitlab.com
+        username: ${{ secrets.GITLAB_USERNAME }}
+        password: ${{ secrets.GITLAB_ACCESS_TOKEN }}
+
+    - name: Run check script in Docker container
+      run: |
+        docker run --rm \
+          -v ${{ github.workspace }}/main:/workspace/main \
+          -v ${{ github.workspace }}/pr:/workspace/pr \
+          -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+          -e BASE_REPOSITORY="${{ github.repository }}" \
+          -e HEAD_REPOSITORY="${{ github.event.pull_request.head.repo.full_name }}" \
+          -e HEAD_BRANCH="${{ github.event.pull_request.head.ref }}" \
+          registry.gitlab.com/datasurface-inc/datasurface:latest \
+          python -m datasurface.handler.action /workspace/main /workspace/pr
