@@ -12,16 +12,15 @@ A template for bootstrapping a DataSurface Yellow environment on Docker Desktop 
 
 This guide walks you through the following:
 
-* Setup a postgres database container for datasurface to use
-* Clone this repository containing the bootstrap model and modify it as needed, then push the customized model to a new repository, lets call it 'demo_actual'.
-* Create a gitsync repository called demo_gitsync which is just for DAGs for our future airflow
+- Setup a postgres database container for datasurface to use
+- Clone this repository containing the bootstrap model and modify it as needed, then push the customized model to a new repository, lets call it 'demo1_actual'.
+- Create a gitsync repository called demo1_gitsync which is just for DAGs for our future airflow
 
-* Create the database server and databases
-* Install helm with correct values and use gitsync against demo_gitsync
+- Create the database server and databases
+- Install helm with correct values and use gitsync against demo1_gitsync
 
-* Use demo_actual's customized model to generate the bootstrap artifacts
-* Push the generated DAG files to demo_gitsync
-
+- Use demo1_actual's customized model to generate the bootstrap artifacts
+- Push the generated DAG files to demo1_gitsync
 
 ### Step 1: Start PostgreSQL
 
@@ -32,11 +31,36 @@ docker compose up -d
 
 This creates `airflow_db` and `merge_db` databases.
 
-### Step 2: Clone the Repository
+### Step 2: Clone and Customize the Model
 
 ```bash
+# Clone the template
 git clone https://github.com/datasurface/demo1.git
 cd demo1
+```
+
+Customize the model for your environment:
+
+**Edit `eco.py`:**
+```python
+GIT_REPO_OWNER: str = "yourorg"
+GIT_REPO_NAME: str = "demo1_actual"
+```
+
+**Edit `helm/airflow-values.yaml`:**
+```yaml
+dags:
+  gitSync:
+    repo: https://github.com/yourorg/demo1_gitsync.git
+```
+
+Push the customized model to your repository:
+
+```bash
+git remote set-url origin https://github.com/yourorg/demo1_actual.git
+git add -A
+git commit -m "Customize model for my environment"
+git push -u origin main
 ```
 
 ### Step 3: Create Kubernetes Namespace and Secrets
@@ -78,6 +102,8 @@ helm install airflow apache-airflow/airflow \
 ```
 
 ### Step 5: Generate and Deploy Bootstrap
+
+Here we should clone the current demo1_actual repo and then use the model with this docker run command to generate the various bootstrap artifacts needed for the system.
 
 ```bash
 # Generate bootstrap artifacts
