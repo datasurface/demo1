@@ -5,9 +5,8 @@ A template for bootstrapping a DataSurface Yellow environment on Docker Desktop 
 ## Prerequisites
 
 - Docker Desktop with Kubernetes enabled
-- Python 3.12+
 - `kubectl` and `helm` CLI tools
-- GitHub account with access to create repositories
+- GitHub Personal Access Token (for GitSync)
 
 ## Quick Start
 
@@ -20,41 +19,14 @@ docker compose up -d
 
 This creates `airflow_db` and `merge_db` databases.
 
-### Step 2: Fork This Repository
-
-Fork this template to your own GitHub repository (e.g., `https://github.com/yourorg/demo1.git`).
-
-### Step 3: Clone Your Fork
+### Step 2: Clone the Repository
 
 ```bash
-git clone https://github.com/datasurface/demo1.git
-cd demo1
+git clone https://github.com/datasurface/demo1_airflow.git
+cd demo1_airflow
 ```
 
-### Step 4: Customize the Model
-
-**Edit `eco.py`:**
-
-```python
-GIT_REPO_OWNER: str = "yourorg"      # Your GitHub organization/username
-GIT_REPO_NAME: str = "your-repo"     # Your repository name
-```
-
-**Edit `rte_demo.py`** (only if using a different namespace):
-
-```python
-KUB_NAME_SPACE: str = "demo1"    # Change if using different namespace
-```
-
-**Edit `helm/airflow-values.yaml`:**
-
-```yaml
-dags:
-  gitSync:
-    repo: https://github.com/yourorg/your-repo.git  # Your forked repository
-```
-
-### Step 5: Create Kubernetes Namespace and Secrets
+### Step 3: Create Kubernetes Namespace and Secrets
 
 ```bash
 export NAMESPACE="demo1"
@@ -80,7 +52,7 @@ kubectl create secret generic git-dags \
   -n $NAMESPACE
 ```
 
-### Step 6: Install Airflow
+### Step 4: Install Airflow
 
 ```bash
 helm repo add apache-airflow https://airflow.apache.org
@@ -92,7 +64,7 @@ helm install airflow apache-airflow/airflow \
   --timeout 10m
 ```
 
-### Step 7: Generate and Deploy Bootstrap
+### Step 5: Generate and Deploy Bootstrap
 
 ```bash
 # Generate bootstrap artifacts
