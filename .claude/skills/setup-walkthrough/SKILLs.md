@@ -47,6 +47,7 @@ kubectl get storageclass
 ```
 
 Common values:
+
 - `standard` (some Docker Desktop versions)
 - `hostpath` (other Docker Desktop versions)
 
