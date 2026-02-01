@@ -226,6 +226,54 @@ helm install airflow apache-airflow/airflow \
 
 ---
 
+## Step 5a: Create RBAC for Airflow Secret Access
+
+**CRITICAL: The infrastructure DAG needs to read Kubernetes secrets. Without this, DAGs will fail to import.**
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-secret-reader
+  namespace: $NAMESPACE
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-secret-reader-binding
+  namespace: $NAMESPACE
+subjects:
+- kind: ServiceAccount
+  name: airflow-dag-processor
+  namespace: $NAMESPACE
+- kind: ServiceAccount
+  name: airflow-worker
+  namespace: $NAMESPACE
+- kind: ServiceAccount
+  name: airflow-scheduler
+  namespace: $NAMESPACE
+- kind: ServiceAccount
+  name: airflow-triggerer
+  namespace: $NAMESPACE
+roleRef:
+  kind: Role
+  name: airflow-secret-reader
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+**Checkpoint:** Run `kubectl get role,rolebinding -n $NAMESPACE` - should show:
+
+- role.rbac.authorization.k8s.io/airflow-secret-reader
+- rolebinding.rbac.authorization.k8s.io/airflow-secret-reader-binding
+
+---
+
 ## Step 6: Pull DataSurface Image and Generate Bootstrap
 
 ```bash
@@ -367,4 +415,19 @@ kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
 ```bash
 lsof -i :5432  # Check for port conflicts
 docker logs datasurface-postgres  # Check container logs
+```
+
+### DAG import errors (Forbidden / secrets access)
+
+If DAGs fail to import with "Forbidden" errors reading secrets:
+
+```bash
+# Check for import errors
+kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- airflow dags list-import-errors
+
+# Verify RBAC exists
+kubectl get role,rolebinding -n $NAMESPACE | grep airflow-secret
+
+# If missing, create RBAC (see Step 5a) then restart dag-processor:
+kubectl rollout restart deployment/airflow-dag-processor -n $NAMESPACE
 ```
