@@ -56,7 +56,7 @@ cd ../..
 
 This creates `airflow_db` and `merge_db` databases.
 
-### Step 3: Customize the Model
+### Step 3: Customize the Model and push it to the demo1_actual repository
 
 Customize the model for your environment:
 
