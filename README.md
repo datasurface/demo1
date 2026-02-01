@@ -26,29 +26,37 @@ export DATASURFACE_VERSION="1.1.0"
 
 This guide walks you through:
 
-1. Start PostgreSQL database container
-2. Clone and customize the model, push to your repository
-3. Create an empty GitSync repository for Airflow DAGs
+1. Clone the model repository
+2. Start PostgreSQL database container
+3. Customize the model and push to your repository
 4. Configure Kubernetes namespace, secrets, and image pull credentials
 5. Install Airflow via Helm
-6. Generate bootstrap artifacts and deploy
+6. Pull the DataSurface image
+7. Generate bootstrap artifacts and deploy
 
-### Step 1: Start PostgreSQL
-
-```bash
-cd docker/postgres
-docker compose up -d
-```
-
-This creates `airflow_db` and `merge_db` databases.
-
-### Step 2: Clone and Customize the Model
+### Step 1: Clone and Customize the Model
 
 ```bash
 # Clone the template
 git clone https://github.com/datasurface/demo1.git
 cd demo1
 ```
+
+### Step 1.5: Optional for AI assistants
+
+There are several claude skills defined in the cloned repo. Use them to help with the steps below.
+
+### Step 2: Start PostgreSQL
+
+```bash
+cd docker/postgres
+docker compose up -d
+cd ../..
+```
+
+This creates `airflow_db` and `merge_db` databases.
+
+### Step 3: Customize the Model
 
 Customize the model for your environment:
 
@@ -87,7 +95,7 @@ git commit -m "Customize model for my environment"
 git push -u origin main
 ```
 
-### Step 3: Create Kubernetes Namespace and Secrets
+### Step 4: Create Kubernetes Namespace and Secrets
 
 ```bash
 # Create namespace
@@ -130,7 +138,7 @@ kubectl patch serviceaccount default -n $NAMESPACE \
   -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
 ```
 
-### Step 4: Install Airflow
+### Step 5: Install Airflow
 
 ```bash
 helm repo add apache-airflow https://airflow.apache.org
@@ -142,7 +150,7 @@ helm install airflow apache-airflow/airflow \
   --timeout 10m
 ```
 
-### Step 5: Pull DataSurface Image
+### Step 6: Pull DataSurface Image
 
 ```bash
 # Login to GitLab registry
@@ -152,7 +160,7 @@ docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER
 docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
 ```
 
-### Step 6: Generate and Deploy Bootstrap
+### Step 7: Generate and Deploy Bootstrap
 
 ```bash
 # Generate bootstrap artifacts
