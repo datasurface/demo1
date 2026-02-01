@@ -40,6 +40,18 @@ Also ask for the target repository names:
 - **Model repository**: Where the customized model will be pushed (e.g., `yourorg/demo1_actual`)
 - **Airflow DAG repository**: Where DAGs will be synced from (e.g., `yourorg/demo1_airflow`)
 
+**Detect the Kubernetes storage class** (varies between Docker Desktop installations):
+
+```bash
+kubectl get storageclass
+```
+
+Common values:
+- `standard` (some Docker Desktop versions)
+- `hostpath` (other Docker Desktop versions)
+
+Save this value - you'll need it in Step 2.
+
 ---
 
 ## Step 0: Clean Up Previous Installation (if needed)
@@ -112,7 +124,19 @@ dags:
     repo: https://github.com/<org>/<airflow-repo>.git
 ```
 
-### 2c. Verify `rte_demo.py`
+**Also update the storage class** if not `standard` (check all `storageClassName` entries):
+
+```yaml
+redis:
+  persistence:
+    storageClassName: <storage-class>  # e.g., hostpath
+
+workers:
+  persistence:
+    storageClassName: <storage-class>
+```
+
+### 2c. Edit `rte_demo.py`
 
 Confirm the Docker image uses the correct version:
 
@@ -120,7 +144,23 @@ Confirm the Docker image uses the correct version:
 datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.1.0",
 ```
 
-**Checkpoint:** All three files have been edited with the user's values
+**Also update the storage class** if not `standard`:
+
+```python
+pv_storage_class="<storage-class>",  # e.g., "hostpath"
+```
+
+And in `git_config`:
+
+```python
+git_config: GitCacheConfig = GitCacheConfig(
+    enabled=True,
+    access_mode="ReadWriteOnce",
+    storageClass="<storage-class>"  # e.g., "hostpath"
+)
+```
+
+**Checkpoint:** All files have been edited with the user's values, including correct storage class
 
 ---
 
@@ -416,6 +456,23 @@ kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
 lsof -i :5432  # Check for port conflicts
 docker logs datasurface-postgres  # Check container logs
 ```
+
+### PVC pending / storage class not found
+
+If PersistentVolumeClaims are stuck in Pending:
+
+```bash
+# Check available storage classes
+kubectl get storageclass
+
+# Check PVC status
+kubectl get pvc -n $NAMESPACE
+
+# Describe PVC for error details
+kubectl describe pvc <pvc-name> -n $NAMESPACE
+```
+
+Common fix: Update `storageClassName` in `helm/airflow-values.yaml` and `rte_demo.py` to match your cluster's storage class (e.g., `hostpath` instead of `standard`), then redeploy.
 
 ### DAG import errors (Forbidden / secrets access)
 
