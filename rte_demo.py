@@ -45,7 +45,6 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
     yp_assembly: YellowExternalAirflow3AndMergeDatabase = YellowExternalAirflow3AndMergeDatabase(
         name="Demo",
         namespace=KUB_NAME_SPACE,
-        roMergeCRGCredential=Credential("postgres", CredentialType.USER_PASSWORD),
         git_cache_config=git_config
     )
 
