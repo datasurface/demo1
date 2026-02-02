@@ -1,24 +1,15 @@
-# Introduction
+# Demo1 docker prompt
 
-This file details how to setup the project initially.
-
-## Setup PIP
-
-The python module for datasurface is distributed using a private gitlab module repository which you should have been given a username and PAT for. We need to setup pip to use these credentials when installing the project requirements. Edit your ~/.pip/pip.conf file to have the following lines
-
-```ini
-[global]
-extra-index-url = https://YOUR_USERNAME:YOUR_TOKEN@gitlab.com/api/v4/projects/77796931/packages/pypi/simple
-```
-
-## Setup a .venv
-
-```bash
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-code .
-```
-
-You will now be in vscode with the start project open.
+ Create a DataSurface Yellow system on my local Docker Desktop Kubernetes.
+ Configuration:
+    - Model repository: billynewport/demo2_actual
+    - Airflow DAG repository: billynewport/demo2_airflow
+    - GitHub username: billynewport
+    - Namespace: demo1
+    - DataSurface version: 1.1.0
+Environment variables already set:
+    - GITLAB_CUSTOMER_USER / GITLAB_CUSTOMER_TOKEN - GitLab registry credentials
+    - GH_DEMO2_AIRFLOW_USER / GH_DEMO2_AIRFLOW_PAT - credentials for Airflow DAG sync
+    GitHub PAT for model repository access: GITHUB_MODEL_PULL_TOKEN
+I'm logged into GitHub as billynewport so normal git commands work.
+I want to use this projects setup-walkthrough skill
