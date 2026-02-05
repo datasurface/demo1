@@ -55,11 +55,11 @@ Save this value - you'll need it in Step 2.
 
 ---
 
-## Step 0: Clean Up Previous Installation (if needed)
+## Step 0: Clean Up Previous Installation
 
-**Skip this step if this is a fresh installation.**
+**IMPORTANT: Always run this step, even for "fresh" installations.** Docker volumes persist across container deletions, so old Airflow DAG run history and merge data can survive even after removing containers. This causes scheduling issues where the scheduler sees stale runs.
 
-If there's an existing installation, clean it up first:
+### 0a. Clean up Kubernetes namespace (if exists)
 
 ```bash
 # Check for existing namespace
@@ -80,28 +80,20 @@ kubectl get namespace $NAMESPACE -o json | jq '.spec.finalizers = []' | \
   kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f -
 ```
 
-Reset PostgreSQL databases (choose one approach):
+### 0b. Reset PostgreSQL (MANDATORY)
 
-**Option A: If PostgreSQL container is already running** (preserves container, clears data):
-
-```bash
-# Drop and recreate databases to clear old Airflow DAG history and merge data
-docker exec datasurface-postgres psql -U postgres -c "DROP DATABASE IF EXISTS airflow_db;" 
-docker exec datasurface-postgres psql -U postgres -c "CREATE DATABASE airflow_db;"
-docker exec datasurface-postgres psql -U postgres -c "DROP DATABASE IF EXISTS merge_db;"
-docker exec datasurface-postgres psql -U postgres -c "CREATE DATABASE merge_db;"
-docker exec datasurface-postgres psql -U postgres -c "DROP DATABASE IF EXISTS customer_db;"
-docker exec datasurface-postgres psql -U postgres -c "CREATE DATABASE customer_db;"
-```
-
-**Option B: Full reset** (destroys and recreates container):
+**Always reset the databases to ensure clean state.** Even if you deleted the container, the Docker volume persists with old data.
 
 ```bash
 cd docker/postgres
 docker compose down -v
 ```
 
-**Checkpoint:** `kubectl get namespace $NAMESPACE` should return "not found"
+The `-v` flag removes the named volume (`datasurface-postgres-data`), ensuring all old Airflow metadata, DAG run history, and merge data are deleted.
+
+**Checkpoint:**
+- `kubectl get namespace $NAMESPACE` should return "not found"
+- `docker volume ls | grep datasurface-postgres` should return nothing
 
 ---
 
@@ -109,10 +101,17 @@ docker compose down -v
 
 ```bash
 cd docker/postgres
+
+# Verify no stale volume exists (should return nothing)
+docker volume ls | grep datasurface-postgres
+
+# Start fresh PostgreSQL
 docker compose up -d
 ```
 
-**Checkpoint:** Run `docker ps | grep datasurface-postgres` - container should be running
+**Checkpoint:**
+- `docker ps | grep datasurface-postgres` - container should be running
+- `docker volume ls | grep datasurface-postgres` - should show exactly one volume (newly created)
 
 ---
 
