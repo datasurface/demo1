@@ -70,52 +70,56 @@ git tag v1.0.1-demo <commit-hash>
 git push origin v1.0.1-demo
 ```
 
-## Step 2: Check for Missing Secrets
+## Step 2: Create Required Secrets
 
-Dynamic DAGs require Kubernetes secrets for database credentials. Missing secrets prevent DAG creation.
+**REQUIRED**: The ingestion DAG needs credentials to access the source database. Create this secret before proceeding.
 
-### List existing secrets
+### Check if secret already exists
 
 ```bash
-kubectl get secrets -n demo1
+kubectl get secret customer-source-credential -n demo1 2>/dev/null && echo "Secret exists" || echo "Secret MISSING - create it below"
 ```
 
-### Check infrastructure logs for missing secrets
+### Create the customer-source-credential secret
 
 ```bash
-# Trigger infrastructure DAG and check logs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
-
-# Wait ~20 seconds, then check for secret errors
-kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  find /opt/airflow/logs/dag_id=demo-psp_infrastructure -name "*.log" -mmin -2 -exec grep -l "Secret.*not found" {} \;
-```
-
-### Common missing secrets
-
-For source database ingestion, you typically need a credential secret:
-
-```bash
-# Example: Create credential for source database
-# Model credential name: "customer-source-credential" -> K8s secret: "customer-source-credential"
 kubectl create secret generic customer-source-credential \
   --from-literal=USER=postgres \
   --from-literal=PASSWORD=password \
   -n demo1
 ```
 
-**Naming rules:**
+**Naming rules for secrets:**
 - Lowercase
 - Underscores (`_`) become hyphens (`-`)
 - Keys are uppercase: `USER`, `PASSWORD`, `TOKEN`
 
 See `/create-k8-credential` skill for detailed credential creation.
 
-## Step 3: Trigger the Pipeline
+## Step 3: Unpause DAGs
 
-After ensuring tags and secrets are in place, trigger the pipeline in order:
+**IMPORTANT**: DAGs are paused by default. You MUST unpause them BEFORE triggering, otherwise triggers will be ignored.
 
-### 3a. Trigger Infrastructure DAG
+```bash
+# Unpause all key DAGs FIRST
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_factory_dag
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_datatransformer_factory
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
+```
+
+Verify DAGs are unpaused (is_paused should be False):
+
+```bash
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/null
+```
+
+## Step 4: Trigger the Pipeline
+
+After secrets are created and DAGs are unpaused, trigger the pipeline in order:
+
+### 4a. Trigger Infrastructure DAG
 
 ```bash
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
@@ -123,7 +127,7 @@ kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo
 
 Wait ~20 seconds for completion.
 
-### 3b. Verify factory and system DAGs were created
+### 4b. Verify factory and system DAGs were created
 
 ```bash
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/null | grep -E "(factory|reconcile|cqrs|infrastructure)"
@@ -138,7 +142,7 @@ scd2_datatransformer_factory     - Factory for data transformer DAGs
 scd2_factory_dag                 - Factory that creates ingestion DAGs
 ```
 
-### 3c. Trigger Factory DAG to create ingestion DAGs
+### 4c. Trigger Factory DAG to create ingestion DAGs
 
 ```bash
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2_factory_dag
@@ -155,27 +159,12 @@ Expected output:
 scd2__CustomerDB_ingestion
 ```
 
-## Step 4: Unpause DAGs
-
-New DAGs are **paused by default**. Unpause them to allow scheduling:
-
-### Via CLI
+### 4d. Unpause and trigger the ingestion DAG
 
 ```bash
-# Unpause all key DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_factory_dag
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_datatransformer_factory
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2__CustomerDB_ingestion
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2__CustomerDB_ingestion
 ```
-
-### Via Airflow UI
-
-1. Port-forward to Airflow UI: `kubectl port-forward -n demo1 svc/airflow-api-server 8080:8080`
-2. Open http://localhost:8080
-3. Toggle the pause switch for each DAG
 
 ## Step 5: Verify Ingestion is Running
 
@@ -212,8 +201,8 @@ Expected output:
 |-------|-------|----------|
 | No dynamic DAGs | Model not tagged | Create and push tag `v*.*.*-demo` |
 | DAG creation failed | Missing secret | Create K8s secret (see Step 2) |
-| DAGs exist but not running | DAGs paused | Unpause via CLI or UI (see Step 4) |
-| Factory finds 0 configs | Infrastructure hasn't run | Trigger `demo-psp_infrastructure` first |
+| Trigger ignored / DAG not running | DAGs paused | Unpause BEFORE triggering (see Step 3) |
+| Factory finds 0 configs | Infrastructure hasn't run | Unpause and trigger `demo-psp_infrastructure` first |
 | Reconcile finds no tables | Ingestion hasn't run | Wait for ingestion DAG to complete |
 
 ## Quick Start Commands
@@ -224,23 +213,29 @@ Run these in sequence to start initial ingestion:
 # 1. Ensure model is tagged and pushed (use appropriate version)
 git tag v1.0.1-demo && git push origin v1.0.1-demo
 
-# 2. Trigger infrastructure DAG to load model and create factory DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
-sleep 20
+# 2. Create the required customer-source-credential secret
+kubectl create secret generic customer-source-credential \
+  --from-literal=USER=postgres \
+  --from-literal=PASSWORD=password \
+  -n demo1
 
-# 3. Trigger factory DAG to create ingestion DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2_factory_dag
-sleep 15
-
-# 4. Unpause all DAGs
+# 3. Unpause all DAGs FIRST (triggers are ignored on paused DAGs)
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_factory_dag
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_datatransformer_factory
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2__CustomerDB_ingestion
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
 
-# 5. Trigger first ingestion run (or wait for cron schedule)
+# 4. Trigger infrastructure DAG to load model and create factory DAGs
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
+sleep 20
+
+# 5. Trigger factory DAG to create ingestion DAGs
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2_factory_dag
+sleep 15
+
+# 6. Unpause and trigger ingestion DAG (created by factory in step 5)
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2__CustomerDB_ingestion
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2__CustomerDB_ingestion
 ```
 
