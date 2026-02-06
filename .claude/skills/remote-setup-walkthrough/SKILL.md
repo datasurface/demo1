@@ -21,6 +21,8 @@ Before starting, verify the user has:
 - [ ] Two external PostgreSQL databases reachable from both local machine and K8s pods
 - [ ] GitHub Personal Access Token (needs repo access)
 - [ ] GitLab credentials for DataSurface images
+- [ ] `nfs-common` installed on all cluster nodes (required for Longhorn RWX volumes)
+- [ ] PostgreSQL `pg_hba.conf` configured to allow connections from pod CIDR and Tailscale network
 
 Ask the user for these values if not already provided:
 
@@ -63,6 +65,36 @@ DATASURFACE_VERSION   # DataSurface version (default: 1.1.0)
 ```bash
 SSH_CMD="ssh -i $SSH_KEY $SSH_USER@$SSH_HOST"
 SCP_CMD="scp -i $SSH_KEY"
+```
+
+### Verify NFS client on all nodes
+
+**Required for Longhorn ReadWriteMany volumes.** Without `nfs-common`, pods using shared volumes will fail with mount errors.
+
+```bash
+# Check each node
+for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
+  $SSH_CMD "ssh $node 'dpkg -l | grep nfs-common'"
+done
+
+# If missing on any node, install:
+# ssh <node> "sudo apt-get update && sudo apt-get install -y nfs-common"
+```
+
+### Verify PostgreSQL network access
+
+Ensure `pg_hba.conf` on each PostgreSQL host allows connections from the Kubernetes pod network and Tailscale network:
+
+```bash
+# On each PostgreSQL host, add to /etc/postgresql/*/main/pg_hba.conf:
+# For Tailscale network (100.64.0.0/10)
+host    all    all    100.64.0.0/10    scram-sha-256
+
+# For pod network (check your cluster's pod CIDR)
+host    all    all    10.244.0.0/16    scram-sha-256
+
+# Reload PostgreSQL
+sudo systemctl reload postgresql
 ```
 
 ### Verify SSH connectivity and cluster access
@@ -738,3 +770,258 @@ $SSH_CMD "kubectl rollout restart deployment/airflow-dag-processor -n $NAMESPACE
 | PostgreSQL reset | `docker compose down -v` | `DROP DATABASE` / `CREATE DATABASE` via psql |
 | Airflow UI access | `kubectl port-forward` | SSH tunnel + `kubectl port-forward` |
 | DAG repo timing | Can initialize after Airflow install | **Must initialize before Airflow install** (git-sync init fails on empty repo) |
+
+---
+
+## Post-Setup: Pre-Pull Images on Cluster Nodes (Recommended)
+
+Pre-pulling the DataSurface image on worker nodes avoids slow image pulls during job execution and prevents registry rate limits:
+
+```bash
+# Pull using ctr with explicit credentials on each node
+for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
+  echo "Pulling on $node..."
+  $SSH_CMD "ssh $node 'sudo ctr -n k8s.io images pull \
+    registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
+    --user ${GITLAB_CUSTOMER_USER}:${GITLAB_CUSTOMER_TOKEN}'"
+done
+
+# Verify image is available on each node
+for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
+  echo "=== $node ==="
+  $SSH_CMD "ssh $node 'sudo crictl images | grep datasurface'"
+done
+```
+
+---
+
+## Post-Setup: Deploy Log Cleanup CronJob
+
+The Airflow logs PVC will eventually fill up, causing all jobs to fail with `OSError: No space left on device`. Deploy this CronJob to prevent it:
+
+```bash
+$SSH_CMD 'cat <<EOF | kubectl apply -f -
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: airflow-log-cleanup
+  namespace: $NAMESPACE
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: cleanup
+            image: busybox:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting log cleanup at $(date)"
+              echo "Before cleanup:"
+              df -h /opt/airflow/logs
+              find /opt/airflow/logs -type f -mtime +2 -delete
+              find /opt/airflow/logs -type d -empty -delete 2>/dev/null || true
+              echo "After cleanup:"
+              df -h /opt/airflow/logs
+              echo "Cleanup complete at $(date)"
+            volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+          volumes:
+          - name: logs
+            persistentVolumeClaim:
+              claimName: airflow-logs
+EOF'
+```
+
+Verify and test:
+
+```bash
+# Check CronJob exists
+$SSH_CMD "kubectl get cronjobs -n $NAMESPACE | grep log-cleanup"
+
+# Trigger a manual run
+$SSH_CMD "kubectl create job --from=cronjob/airflow-log-cleanup airflow-log-cleanup-now -n $NAMESPACE"
+
+# Check logs (may take several minutes on Longhorn/NFS)
+$SSH_CMD "kubectl logs job/airflow-log-cleanup-now -n $NAMESPACE"
+```
+
+**Symptoms of full logs volume:**
+- Worker logs show: `OSError: [Errno 28] No space left on device`
+- Scheduler logs show: `executor_state=failed` for tasks that never started
+- All DAGs fail simultaneously
+
+---
+
+## Post-Setup: MCP Server Access
+
+The bootstrap artifacts include an MCP server deployment that allows AI assistants to query the DataSurface model.
+
+### Check MCP server status
+
+```bash
+$SSH_CMD "kubectl get pods -n $NAMESPACE -l app=demo-psp-mcp-server"
+$SSH_CMD "kubectl get svc -n $NAMESPACE | grep mcp"
+```
+
+### Access MCP server via SSH tunnel
+
+```bash
+# Get the MCP service NodePort
+$SSH_CMD "kubectl get svc demo-psp-mcp -n $NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}'"
+
+# Or port-forward
+ssh -i $SSH_KEY -L 8000:localhost:8000 $SSH_USER@$SSH_HOST \
+  "kubectl port-forward svc/demo-psp-mcp 8000:8000 -n $NAMESPACE"
+```
+
+The MCP server is accessible at `http://localhost:8000/sse`
+
+### Configure Claude Code or Cursor IDE
+
+Add to `.mcp.json` or Cursor MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "datasurface": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_object_types` | List queryable object types |
+| `list_objects` | List all objects of a type |
+| `read_object` | Get full JSON for an object |
+| `search_model` | Search across model objects |
+| `get_lineage` | Get data lineage for a datastore |
+| `list_all_repositories` | List all git repos used by model |
+
+---
+
+## Updating After Code Changes
+
+### Regenerate and redeploy DAGs
+
+```bash
+# Pull latest DataSurface image locally
+docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+
+# Regenerate artifacts
+docker run --rm \
+  -v "$(pwd)":/workspace/model \
+  -w /workspace/model \
+  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
+  python -m datasurface.cmd.platform generatePlatformBootstrap \
+  --ringLevel 0 \
+  --model /workspace/model \
+  --output /workspace/model/generated_output \
+  --psp Demo_PSP \
+  --rte-name demo
+
+# Update DAG in airflow repo
+cp generated_output/Demo_PSP/demo_psp_infrastructure_dag.py /tmp/<airflow-repo>/dags/
+cd /tmp/<airflow-repo>
+git add dags/ && git commit -m "Update infrastructure DAG" && git push
+```
+
+Git-sync will pick up the change within 60 seconds.
+
+### Re-run jobs after schema changes
+
+`createOrUpdateTable` will not perform breaking schema changes. If table schemas have changed, drop tables first:
+
+```bash
+# Drop tables on the merge DB
+PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -d merge_db -c "
+  DROP TABLE IF EXISTS demo_psp_factory_dags, demo_psp_cqrs_dags,
+    demo_psp_dc_reconcile_dags, scd2_airflow_dsg, scd2_airflow_datatransformer;
+"
+
+# Copy updated job YAMLs to remote
+$SCP_CMD generated_output/Demo_PSP/*.yaml $SSH_USER@$SSH_HOST:/tmp/
+
+# Delete old jobs and re-run
+$SSH_CMD "kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job \
+  -n $NAMESPACE --ignore-not-found"
+
+$SSH_CMD "kubectl apply -f /tmp/demo_psp_ring1_init_job.yaml && \
+  kubectl wait --for=condition=complete --timeout=180s \
+  job/demo-psp-ring1-init -n $NAMESPACE"
+
+$SSH_CMD "kubectl apply -f /tmp/demo_psp_model_merge_job.yaml && \
+  kubectl wait --for=condition=complete --timeout=180s \
+  job/demo-psp-model-merge-job -n $NAMESPACE"
+```
+
+### Clear git cache
+
+If model changes aren't being picked up despite new git tags (the git cache is quantized to 5-minute intervals):
+
+```bash
+$SSH_CMD "kubectl run cache-clear --rm -i --restart=Never \
+  --image=busybox \
+  -n $NAMESPACE \
+  --overrides='{\"spec\":{\"containers\":[{\"name\":\"cache-clear\",\"image\":\"busybox\",\"command\":[\"sh\",\"-c\",\"rm -rf /cache/*\"],\"volumeMounts\":[{\"name\":\"git-cache\",\"mountPath\":\"/cache\"}]}],\"volumes\":[{\"name\":\"git-cache\",\"persistentVolumeClaim\":{\"claimName\":\"git-cache-pvc\"}}]}}' \
+  -- sh -c 'rm -rf /cache/* && echo Cache cleared'"
+```
+
+---
+
+## Additional Troubleshooting
+
+### Logs volume full (all jobs suddenly failing)
+
+```bash
+# Check logs volume usage
+$SSH_CMD "kubectl exec deployment/airflow-worker -n $NAMESPACE -c worker -- df -h /opt/airflow/logs"
+
+# Emergency cleanup: delete logs older than 3 days
+$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- \
+  find /opt/airflow/logs -type f -mtime +3 -delete"
+
+# Deploy the log cleanup CronJob (see Post-Setup section) to prevent recurrence
+```
+
+### Schema changes not taking effect
+
+`createOrUpdateTable` is non-destructive — it won't drop columns or change types. You must drop the affected tables manually and re-run ring1-init + model-merge. See "Re-run jobs after schema changes" above.
+
+### Pods stuck in ContainerCreating (volume mount errors)
+
+Check if `nfs-common` is installed on the node where the pod is scheduled:
+
+```bash
+# Find which node the pod is on
+$SSH_CMD "kubectl get pod <pod-name> -n $NAMESPACE -o jsonpath='{.spec.nodeName}'"
+
+# Check nfs-common on that node
+$SSH_CMD "ssh <node-name> 'dpkg -l | grep nfs-common'"
+
+# If missing:
+$SSH_CMD "ssh <node-name> 'sudo apt-get update && sudo apt-get install -y nfs-common'"
+```
+
+### Monitoring cluster resource usage
+
+```bash
+# Node resource usage
+$SSH_CMD "kubectl top nodes"
+
+# Pod resource usage (sorted by CPU)
+$SSH_CMD "kubectl top pods -n $NAMESPACE --sort-by=cpu"
+
+# Check Airflow worker memory
+$SSH_CMD "kubectl top pods -n $NAMESPACE -l component=worker"
+```
