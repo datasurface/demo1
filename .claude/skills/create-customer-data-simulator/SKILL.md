@@ -46,7 +46,7 @@ DB_PORT=1433                     # Default for sqlserver
 ```bash
 DB_TYPE=snowflake
 DB_USER=DATASURFACE
-DB_ACCOUNT=HORSEQD-GQC71098     # Snowflake account identifier
+DB_ACCOUNT=<snowflake-account-id>     # Snowflake account identifier
 DB_DATABASE=SNOWFLAKE_LEARNING_DB
 DB_WAREHOUSE=COMPUTE_WH
 DB_SCHEMA=PUBLIC                 # Default: PUBLIC
