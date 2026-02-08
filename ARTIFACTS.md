@@ -15,7 +15,12 @@ You will receive the following from DataSurface:
 | `registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}` | Core DataSurface image |
 | `registry.gitlab.com/datasurface-inc/datasurface/datasurface-dbt:v${DATASURFACE_VERSION}` | DataSurface with dbt support |
 
-For pulling images and configuring Kubernetes, use the Claude Code skills:
+```bash
+docker login registry.gitlab.com -u <username> -p <token>
+docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+```
+
+For Kubernetes configuration, use the Claude Code skills:
 
 - `/pull-datasurface-image` — Pull images to your local machine
 - `/setup-k8s-registry-secret` — Configure Kubernetes image pull secrets
