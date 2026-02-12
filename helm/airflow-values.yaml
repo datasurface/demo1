@@ -7,7 +7,7 @@ executor: CeleryExecutor
 images:
   airflow:
     repository: apache/airflow
-    tag: "3.1.6"
+    tag: "3.1.7"
 
 # External PostgreSQL (running in Docker, accessible via host.docker.internal)
 postgresql:
