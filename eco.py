@@ -10,7 +10,16 @@ from datasurface.dsl import InfrastructureVendor, InfrastructureLocation, Ecosys
 from datasurface.security import Credential, CredentialType
 from datasurface.documentation import PlainTextDocumentation
 from datasurface.repos import GitHubRepository
-from rte_demo import createDemoRTE
+import os
+
+_RTE_TARGET = os.environ.get("RTE_TARGET", "local")
+
+if _RTE_TARGET == "aws":
+    from rte_aws import createDemoRTE
+elif _RTE_TARGET == "azure":
+    from rte_azure import createDemoRTE  # type: ignore[no-redef]
+else:
+    from rte_demo import createDemoRTE  # type: ignore[no-redef]
 
 GIT_REPO_OWNER: str = "git_username"  # Change to your github username
 GIT_REPO_NAME: str = "gitrepo_name"  # Change to your github repository name containing this project
