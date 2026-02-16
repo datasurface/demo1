@@ -1,0 +1,122 @@
+# Airflow Helm Values for AWS EKS
+# Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-aws.yaml
+# PLACEHOLDER values are replaced by the setup-walkthrough-aws skill during deployment.
+
+executor: CeleryExecutor
+
+# Custom Airflow image with AWS dependencies (boto3, providers-amazon, providers-cncf-kubernetes)
+images:
+  airflow:
+    repository: datasurface/airflow
+    tag: "3.1.7"
+
+# External Aurora PostgreSQL
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: postgres
+    pass: PLACEHOLDER_DB_PASSWORD
+    protocol: postgresql
+    host: PLACEHOLDER_AURORA_ENDPOINT
+    port: 5432
+    db: airflow_db
+
+# Redis for Celery broker
+redis:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: efs-sc
+
+# Scheduler
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# Workers
+workers:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClassName: efs-sc
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# API server
+apiServer:
+  service:
+    type: ClusterIP
+
+# DAG processor
+dagProcessor:
+  enabled: true
+
+# Triggerer
+triggerer:
+  enabled: true
+
+# GitSync for DAGs
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: true
+    repo: https://github.com/PLACEHOLDER_AIRFLOW_REPO.git
+    branch: main
+    subPath: dags
+    wait: 60
+    credentialsSecret: git-dags
+
+# Logs
+logs:
+  persistence:
+    enabled: true
+    storageClassName: efs-sc
+    size: 5Gi
+
+config:
+  logging:
+    delete_local_logs: "False"
+  scheduler:
+    dag_dir_list_interval: "60"
+
+# Service account with IRSA annotation
+serviceAccount:
+  create: true
+  name: airflow-worker
+  annotations:
+    eks.amazonaws.com/role-arn: PLACEHOLDER_AIRFLOW_ROLE_ARN
+
+# Secrets Store CSI volume for Airflow DB connection (mounted from AWS Secrets Manager)
+extraVolumes:
+  - name: secrets-store
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: airflow-secrets
+
+extraVolumeMounts:
+  - name: secrets-store
+    mountPath: /mnt/secrets
+    readOnly: true
+
+# Web UI credentials
+webserver:
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin
