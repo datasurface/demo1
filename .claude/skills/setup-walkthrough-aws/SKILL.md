@@ -215,7 +215,12 @@ cat > airflow-trust-policy.json << EOF
     }]
 }
 EOF
-aws iam update-assume-role-policy --role-name airflow-secrets-role --policy-document file://airflow-trust-policy.json
+AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "${STACK_NAME}-iam-roles" \
+  --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
+  --output text --region $AWS_REGION)
+AIRFLOW_ROLE_NAME=$(echo $AIRFLOW_ROLE_ARN | cut -d'/' -f2)
+aws iam update-assume-role-policy --role-name $AIRFLOW_ROLE_NAME --policy-document file://airflow-trust-policy.json
 
 # Clean up temp files
 rm -f efs-trust-policy.json airflow-trust-policy.json
@@ -391,11 +396,15 @@ This should show the import dispatch logic that selects between `rte_demo` (loca
 
 ```python
 import os
-RTE_TARGET = os.environ.get("RTE_TARGET", "demo")
-if RTE_TARGET == "aws":
-    from rte_aws import *
+
+_RTE_TARGET = os.environ.get("RTE_TARGET", "local")
+
+if _RTE_TARGET == "aws":
+    from rte_aws import createDemoRTE
+elif _RTE_TARGET == "azure":
+    from rte_azure import createDemoRTE  # type: ignore[no-redef]
 else:
-    from rte_demo import *
+    from rte_demo import createDemoRTE  # type: ignore[no-redef]
 ```
 
 **Checkpoint:** `eco.py` imports from `rte_aws` when `RTE_TARGET=aws`.
@@ -778,6 +787,12 @@ Should show:
 ```bash
 # Apply Kubernetes bootstrap (creates PVCs, ConfigMaps, NetworkPolicy, MCP server)
 kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+
+# Ensure Airflow service account has IRSA annotation (safety net - Helm should set this too)
+kubectl annotate serviceaccount airflow-worker \
+  -n $NAMESPACE \
+  eks.amazonaws.com/role-arn=$AIRFLOW_ROLE_ARN \
+  --overwrite
 
 # Delete existing jobs if redeploying
 kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job -n $NAMESPACE --ignore-not-found
