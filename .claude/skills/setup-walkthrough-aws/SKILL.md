@@ -1117,6 +1117,33 @@ The output should show the Airflow secrets role ARN, not the node instance role.
 
 ---
 
+### Worker OOMKilled
+
+**Symptoms:** Worker pod killed with `OOMKilled` status, DAG tasks appear stuck/hung in the UI with no logs.
+
+The default worker memory limit of 2Gi is insufficient when workers execute KubernetesPodOperator tasks. The Helm values template already sets 4Gi limits, but if you used lower values, increase them:
+
+```bash
+helm upgrade airflow apache-airflow/airflow \
+  -f helm/airflow-values-aws.yaml \
+  --set workers.resources.requests.memory=2Gi \
+  --set workers.resources.limits.memory=4Gi \
+  --set workers.resources.limits.cpu=2000m \
+  -n $NAMESPACE
+
+# Force pod recreation (Helm upgrade may not recreate StatefulSet pods)
+kubectl delete pod airflow-worker-0 -n $NAMESPACE
+```
+
+**Checkpoint:** Worker pod restarts with `3/3` containers ready:
+
+```bash
+kubectl get pod airflow-worker-0 -n $NAMESPACE
+kubectl describe pod airflow-worker-0 -n $NAMESPACE | grep -A2 "Limits:"
+```
+
+---
+
 ### Init Container OOMKilled
 
 **Symptoms:** Init containers killed with `OOMKilled` status.
