@@ -143,12 +143,20 @@ export OIDC_PROVIDER_ARN=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='EKSOIDCProviderArn'].OutputValue" \
   --output text --region $AWS_REGION)
 
+export OIDC_ISSUER_URL=$(aws cloudformation describe-stacks \
+  --stack-name $STACK_NAME \
+  --query "Stacks[0].Outputs[?OutputKey=='EKSOIDCIssuerURL'].OutputValue" \
+  --output text --region $AWS_REGION)
+
 aws cloudformation create-stack \
   --stack-name "${STACK_NAME}-iam-roles" \
   --template-body file://aws-marketplace/cloudformation/iam-roles-for-eks.yaml \
   --parameters \
     ParameterKey=EKSOIDCProviderArn,ParameterValue=$OIDC_PROVIDER_ARN \
+    ParameterKey=EKSOIDCIssuerURL,ParameterValue=$OIDC_ISSUER_URL \
     ParameterKey=StackName,ParameterValue=$STACK_NAME \
+    ParameterKey=Namespace,ParameterValue=$NAMESPACE \
+    ParameterKey=AirflowServiceAccount,ParameterValue=airflow-worker \
   --capabilities CAPABILITY_IAM \
   --region $AWS_REGION
 
@@ -166,9 +174,9 @@ Both stacks must be `CREATE_COMPLETE`.
 
 ---
 
-### Step 3: Fix OIDC Trust Policies (PROACTIVE)
+### Step 3: Verify OIDC Trust Policies (SAFETY NET)
 
-**This is a KNOWN ISSUE with the CloudFormation template** - it has hardcoded OIDC IDs that do not match your actual cluster. This step fixes both the EFS CSI driver role AND the Airflow secrets role. Skipping this step causes "Access Denied" errors later.
+**The CloudFormation template now handles OIDC trust policies correctly** via the `EKSOIDCIssuerURL` parameter. This step verifies the policies are correct and fixes them if needed (e.g., if using an older version of the template).
 
 ```bash
 OIDC_ISSUER=$(echo $OIDC_PROVIDER_ARN | cut -d'/' -f2-)
@@ -418,7 +426,7 @@ Get CloudFormation outputs and replace PLACEHOLDERs in the Helm values file:
 ```bash
 export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`AuroraClusterEndpoint`].OutputValue' \
+  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' \
   --output text --region $AWS_REGION)
 
 export AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
