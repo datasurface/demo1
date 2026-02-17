@@ -4,10 +4,10 @@
 
 executor: CeleryExecutor
 
-# Custom Airflow image with AWS dependencies (boto3, providers-amazon, providers-cncf-kubernetes)
+# Standard Apache Airflow image
 images:
   airflow:
-    repository: datasurface/airflow
+    repository: apache/airflow
     tag: "3.1.7"
 
 # External Aurora PostgreSQL
@@ -22,6 +22,7 @@ data:
     host: PLACEHOLDER_AURORA_ENDPOINT
     port: 5432
     db: airflow_db
+    sslmode: require
 
 # Redis for Celery broker
 redis:
@@ -113,6 +114,13 @@ extraVolumeMounts:
   - name: secrets-store
     mountPath: /mnt/secrets
     readOnly: true
+
+# AWS region for boto3 (needed by infrastructure DAG's AwsSecretManager at parse time)
+env:
+  - name: AWS_DEFAULT_REGION
+    value: "PLACEHOLDER_AWS_REGION"
+  - name: AWS_REGION
+    value: "PLACEHOLDER_AWS_REGION"
 
 # Web UI credentials
 webserver:

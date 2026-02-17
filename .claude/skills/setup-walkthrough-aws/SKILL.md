@@ -90,6 +90,10 @@ aws secretsmanager delete-secret --secret-id "datasurface/merge/credentials" \
   --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
 aws secretsmanager delete-secret --secret-id "datasurface/git/credentials" \
   --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
+aws secretsmanager delete-secret --secret-id "datasurface/${NAMESPACE}/Demo/postgres-demo-merge" \
+  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
+aws secretsmanager delete-secret --secret-id "datasurface/${NAMESPACE}/Demo/git" \
+  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
 ```
 
 **Checkpoint:**
@@ -131,6 +135,22 @@ aws cloudformation describe-stacks --stack-name $STACK_NAME \
 
 Stack status must be `CREATE_COMPLETE`.
 
+**IMPORTANT: Create application databases on Aurora.** CloudFormation creates the PostgreSQL instance but not the specific databases needed by Airflow and DataSurface:
+
+```bash
+export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name $STACK_NAME \
+  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' \
+  --output text --region $AWS_REGION)
+
+kubectl run db-setup --rm -i --restart=Never \
+  --image=postgres:16 \
+  --env="PGPASSWORD=$DATABASE_PASSWORD" \
+  -- bash -c "psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE airflow_db;' && psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE merge_db;'"
+```
+
+**Note:** This runs in the `default` namespace since our application namespace does not exist yet. If the `db-setup` pod cannot reach Aurora, you may need to complete Step 4 (kubeconfig) first, then return here to create the databases before proceeding to Step 19.
+
 ---
 
 ### Step 2: Deploy IAM Roles (CloudFormation Stage 2)
@@ -143,20 +163,12 @@ export OIDC_PROVIDER_ARN=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='EKSOIDCProviderArn'].OutputValue" \
   --output text --region $AWS_REGION)
 
-export OIDC_ISSUER_URL=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='EKSOIDCIssuerURL'].OutputValue" \
-  --output text --region $AWS_REGION)
-
 aws cloudformation create-stack \
   --stack-name "${STACK_NAME}-iam-roles" \
   --template-body file://aws-marketplace/cloudformation/iam-roles-for-eks.yaml \
   --parameters \
     ParameterKey=EKSOIDCProviderArn,ParameterValue=$OIDC_PROVIDER_ARN \
-    ParameterKey=EKSOIDCIssuerURL,ParameterValue=$OIDC_ISSUER_URL \
     ParameterKey=StackName,ParameterValue=$STACK_NAME \
-    ParameterKey=Namespace,ParameterValue=$NAMESPACE \
-    ParameterKey=AirflowServiceAccount,ParameterValue=airflow-worker \
   --capabilities CAPABILITY_IAM \
   --region $AWS_REGION
 
@@ -174,9 +186,9 @@ Both stacks must be `CREATE_COMPLETE`.
 
 ---
 
-### Step 3: Verify OIDC Trust Policies (SAFETY NET)
+### Step 3: Apply OIDC Trust Policies (REQUIRED)
 
-**The CloudFormation template now handles OIDC trust policies correctly** via the `EKSOIDCIssuerURL` parameter. This step verifies the policies are correct and fixes them if needed (e.g., if using an older version of the template).
+**CloudFormation cannot use intrinsic functions as YAML mapping keys**, so the IAM roles are created without OIDC scope conditions. This step applies the correctly scoped trust policies via AWS CLI. **Do not skip this step** - without it the roles are overly permissive.
 
 ```bash
 OIDC_ISSUER=$(echo $OIDC_PROVIDER_ARN | cut -d'/' -f2-)
@@ -207,6 +219,9 @@ EOF
 aws iam update-assume-role-policy --role-name $EFS_ROLE_NAME --policy-document file://efs-trust-policy.json
 
 # Fix Airflow secrets role
+# Use StringLike with wildcard so all Airflow SAs (worker, dag-processor, scheduler, triggerer)
+# can assume the role. The infrastructure DAG reads secrets at parse time via AwsSecretManager,
+# which runs in the dag-processor/scheduler pods, not just the worker.
 cat > airflow-trust-policy.json << EOF
 {
     "Version": "2012-10-17",
@@ -215,8 +230,10 @@ cat > airflow-trust-policy.json << EOF
         "Principal": {"Federated": "$OIDC_PROVIDER_ARN"},
         "Action": "sts:AssumeRoleWithWebIdentity",
         "Condition": {
+            "StringLike": {
+                "${OIDC_ISSUER}:sub": "system:serviceaccount:${NAMESPACE}:airflow-*"
+            },
             "StringEquals": {
-                "${OIDC_ISSUER}:sub": "system:serviceaccount:${NAMESPACE}:airflow-worker",
                 "${OIDC_ISSUER}:aud": "sts.amazonaws.com"
             }
         }
@@ -258,6 +275,40 @@ kubectl get nodes
 
 ```bash
 kubectl get nodes -o wide
+```
+
+**IMPORTANT: Fix Aurora security group for EKS pod access.** The CloudFormation template allows RDS access from its own EKS cluster security group, but EKS also creates a managed cluster security group that pods actually use. Add both the EKS managed cluster SG and node remote access SG:
+
+```bash
+RDS_SG=$(aws ec2 describe-security-groups --region $AWS_REGION \
+  --filters "Name=group-name,Values=${STACK_NAME}-rds-sg" \
+  --query 'SecurityGroups[0].GroupId' --output text)
+
+EKS_CLUSTER_SG=$(aws eks describe-cluster --name $CLUSTER_NAME \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text --region $AWS_REGION)
+
+EKS_NODE_SG=$(aws eks describe-nodegroup --cluster-name $CLUSTER_NAME \
+  --nodegroup-name "${STACK_NAME}-nodegroup" \
+  --query 'nodegroup.resources.remoteAccessSecurityGroup' --output text --region $AWS_REGION)
+
+aws ec2 authorize-security-group-ingress \
+  --group-id $RDS_SG --protocol tcp --port 5432 \
+  --source-group $EKS_CLUSTER_SG --region $AWS_REGION 2>/dev/null || true
+
+aws ec2 authorize-security-group-ingress \
+  --group-id $RDS_SG --protocol tcp --port 5432 \
+  --source-group $EKS_NODE_SG --region $AWS_REGION 2>/dev/null || true
+
+echo "RDS security group updated for EKS pod access"
+```
+
+**Checkpoint:** Test Aurora connectivity from a pod:
+
+```bash
+kubectl run db-test --rm -i --restart=Never \
+  --image=postgres:16 \
+  --env="PGPASSWORD=$DATABASE_PASSWORD" \
+  -- psql -h $AURORA_ENDPOINT -U postgres -c "SELECT 1;"
 ```
 
 ---
@@ -439,10 +490,15 @@ sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" helm/airflow-value
 sed -i.bak "s|PLACEHOLDER_DB_PASSWORD|$DATABASE_PASSWORD|g" helm/airflow-values-aws.yaml
 sed -i.bak "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" helm/airflow-values-aws.yaml
 sed -i.bak "s|PLACEHOLDER_AIRFLOW_ROLE_ARN|$AIRFLOW_ROLE_ARN|g" helm/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_AWS_REGION|$AWS_REGION|g" helm/airflow-values-aws.yaml
 rm -f helm/airflow-values-aws.yaml.bak
 ```
 
 **Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
+
+**Note:** The values file includes `sslmode: require` in the `metadataConnection` block. This is required for Aurora/RDS connections and should not be removed. If you see `SSL connection is required` errors from Airflow, verify this field is present.
+
+**Note:** The values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region. Without these env vars, boto3 cannot determine the region and Secrets Manager calls fail. The `PLACEHOLDER_AWS_REGION` values are replaced by the `sed` command above.
 
 **Checkpoint:**
 
@@ -525,6 +581,23 @@ aws secretsmanager create-secret \
   --description "DataSurface Git repository credentials" \
   --secret-string "{\"token\":\"${GITHUB_TOKEN}\"}" \
   --region $AWS_REGION
+
+# Namespace-scoped secrets (used by generated infrastructure DAG and jobs)
+# The DAG and jobs look up secrets at: datasurface/{namespace}/{ecosystem_name}/{credential_name}
+# The secrets above (datasurface/merge/credentials, datasurface/git/credentials) are still needed
+# for the CSI driver and backward compatibility, but these namespace-scoped secrets are what the
+# DAG and standalone jobs actually read at runtime.
+aws secretsmanager create-secret \
+  --name "datasurface/${NAMESPACE}/Demo/postgres-demo-merge" \
+  --description "DataSurface merge DB credentials (namespace-scoped for DAG/job access)" \
+  --secret-string "{\"USER\":\"postgres\",\"PASSWORD\":\"${DATABASE_PASSWORD}\"}" \
+  --region $AWS_REGION
+
+aws secretsmanager create-secret \
+  --name "datasurface/${NAMESPACE}/Demo/git" \
+  --description "DataSurface Git credentials (namespace-scoped for DAG/job access)" \
+  --secret-string "{\"token\":\"${GITHUB_TOKEN}\",\"TOKEN\":\"${GITHUB_TOKEN}\"}" \
+  --region $AWS_REGION
 ```
 
 Verify all secrets were created:
@@ -535,10 +608,12 @@ aws secretsmanager list-secrets \
   --output table --region $AWS_REGION
 ```
 
-**Checkpoint:** All 3 secrets are listed:
+**Checkpoint:** All 5 secrets are listed:
 - `airflow/connections/postgres_default`
 - `datasurface/merge/credentials`
 - `datasurface/git/credentials`
+- `datasurface/${NAMESPACE}/Demo/postgres-demo-merge`
+- `datasurface/${NAMESPACE}/Demo/git`
 
 ---
 
@@ -733,6 +808,29 @@ All Airflow pods should reach `Running` state:
 
 **Note:** If pods are stuck in `Init:Error`, the DAG repository was not initialized before this step (Step 17).
 
+#### 19a. Annotate All Airflow Service Accounts with IRSA Role
+
+The Helm chart's `serviceAccount` block only annotates the `airflow-worker` SA. The dag-processor, scheduler, and triggerer also need Secrets Manager access because the infrastructure DAG reads secrets at parse time via `AwsSecretManager`. Annotate all Airflow SAs:
+
+```bash
+# Annotate all Airflow service accounts with IRSA role (needed for DAG parsing + job execution)
+for sa in airflow-worker airflow-dag-processor airflow-scheduler airflow-triggerer; do
+  kubectl annotate serviceaccount $sa -n $NAMESPACE eks.amazonaws.com/role-arn=$AIRFLOW_ROLE_ARN --overwrite
+done
+# Restart to pick up annotations
+kubectl rollout restart deployment/airflow-dag-processor deployment/airflow-scheduler -n $NAMESPACE
+```
+
+**Checkpoint:**
+
+```bash
+for sa in airflow-worker airflow-dag-processor airflow-scheduler airflow-triggerer; do
+  echo "$sa: $(kubectl get sa $sa -n $NAMESPACE -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}')"
+done
+```
+
+All four service accounts should show the IRSA role ARN.
+
 ---
 
 ### Step 20: Create RBAC for Airflow Secret Access
@@ -791,6 +889,40 @@ Should show:
 ### Step 21: Deploy Bootstrap and Run Jobs
 
 **IMPORTANT:** Jobs must run sequentially. The ring1-init job creates database tables that model-merge depends on. Running them simultaneously causes a race condition where model-merge fails trying to access non-existent tables.
+
+#### 21a. Fix Generated YAML Before Applying
+
+The bootstrap generator produces YAMLs with values that do not match the actual EKS environment. Apply these fixes before deploying:
+
+```bash
+# Fix storage class in generated bootstrap (generator uses 'gp3' but EKS uses 'efs-sc')
+sed -i.bak 's/storageClassName: gp3/storageClassName: efs-sc/g' generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+rm -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml.bak
+
+# Fix service account name in generated job YAMLs (generator uses 'airflow-service-account' but Helm creates 'airflow-worker')
+sed -i.bak 's/serviceAccountName: airflow-service-account/serviceAccountName: airflow-worker/g' generated_output/Demo_PSP/*job*.yaml
+rm -f generated_output/Demo_PSP/*job*.yaml.bak
+
+# Add required environment variables to generated job YAMLs
+# The generator only includes PYTHONPATH and AWS_REGION; rte_aws.py also needs these:
+for job_file in generated_output/Demo_PSP/*job*.yaml; do
+  # Add env vars after the AWS_REGION entry
+  sed -i.bak '/value: "us-east-1"/a\
+          - name: RTE_TARGET\
+            value: "aws"\
+          - name: MERGE_HOST\
+            value: "'$AURORA_ENDPOINT'"\
+          - name: AWS_ACCOUNT_ID\
+            value: "'$AWS_ACCOUNT_ID'"\
+          - name: NAMESPACE\
+            value: "'$NAMESPACE'"' "$job_file"
+done
+rm -f generated_output/Demo_PSP/*job*.yaml.bak
+```
+
+**Note on standalone job env var naming:** The generated standalone job bash scripts export environment variables with underscores (e.g., `postgres_demo_merge_USER`) because bash cannot have hyphens in variable names. However, the DataSurface platform Python code expects hyphenated names (e.g., `postgres-demo-merge_USER`) matching the K8s `V1EnvVar` naming used by the infrastructure DAG. For initial setup, the standalone jobs may need manual fixes to pass hyphenated env var names using the `env` command. **For production use, prefer the infrastructure DAG** (which handles this correctly via K8s `V1EnvVar`) over standalone jobs.
+
+#### 21b. Deploy Bootstrap and Run Jobs
 
 ```bash
 # Apply Kubernetes bootstrap (creates PVCs, ConfigMaps, NetworkPolicy, MCP server)
@@ -1005,7 +1137,7 @@ resources:
 
 ### Aurora Connectivity From Pods
 
-**Symptoms:** Jobs fail with "could not connect to server" or "connection refused" errors.
+**Symptoms:** Jobs fail with "could not connect to server", "connection refused", or "SSL connection is required" errors.
 
 Test database connectivity from inside a pod:
 
@@ -1018,9 +1150,20 @@ kubectl run db-test --rm -i --restart=Never \
 ```
 
 If this fails, check:
-- Aurora security group allows inbound from EKS node security group on port 5432
-- Aurora is in the same VPC or has VPC peering configured
-- Aurora cluster is in `available` state
+
+1. **Security group mismatch (most common cause):** The CloudFormation template creates an RDS security group that allows access from the EKS cluster security group it creates, but EKS also creates its own **managed cluster security group** that pods actually use for networking. You must add ingress rules for both the EKS managed cluster SG and the node remote access SG. See the security group fix in Step 4.
+
+2. **Aurora security group allows inbound from EKS node security group on port 5432.** Verify with:
+   ```bash
+   aws ec2 describe-security-groups --group-ids $RDS_SG --region $AWS_REGION \
+     --query 'SecurityGroups[0].IpPermissions'
+   ```
+
+3. **Aurora is in the same VPC** or has VPC peering configured.
+
+4. **Aurora cluster is in `available` state.**
+
+5. **SSL mode mismatch:** Aurora/RDS requires SSL connections by default. Ensure connection strings include `sslmode=require`. The Helm values file should have `sslmode: require` in the `metadataConnection` block, and the Secrets Manager connection URI should work without explicit sslmode since `psql` defaults to preferring SSL.
 
 ---
 
