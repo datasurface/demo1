@@ -155,7 +155,7 @@ kubectl run db-setup --rm -i --restart=Never \
 
 ### Step 2: Deploy IAM Roles (CloudFormation Stage 2)
 
-This creates IRSA roles for EFS CSI driver and Airflow secrets access.
+This creates IRSA roles for EFS CSI driver and Airflow secrets access. The roles are created without OIDC scope conditions (CloudFormation limitation - see template comments). Step 3 applies the correct trust policies via CLI.
 
 ```bash
 export OIDC_PROVIDER_ARN=$(aws cloudformation describe-stacks \
@@ -830,8 +830,19 @@ The Helm chart's `serviceAccount` block only annotates the `airflow-worker` SA. 
 for sa in airflow-worker airflow-dag-processor airflow-scheduler airflow-triggerer; do
   kubectl annotate serviceaccount $sa -n $NAMESPACE eks.amazonaws.com/role-arn=$AIRFLOW_ROLE_ARN --overwrite
 done
-# Restart to pick up annotations
-kubectl rollout restart deployment/airflow-dag-processor deployment/airflow-scheduler -n $NAMESPACE
+
+# IMPORTANT: Restart ALL Airflow pods to pick up IRSA annotations.
+# Deployments can use rollout restart, but StatefulSets (worker, triggerer) require pod deletion.
+kubectl rollout restart deployment/airflow-dag-processor deployment/airflow-scheduler deployment/airflow-api-server -n $NAMESPACE
+kubectl delete pod -n $NAMESPACE -l component=worker
+kubectl delete pod -n $NAMESPACE -l component=triggerer
+
+# Wait for all pods to be ready
+kubectl rollout status deployment/airflow-dag-processor -n $NAMESPACE
+kubectl rollout status deployment/airflow-scheduler -n $NAMESPACE
+kubectl rollout status deployment/airflow-api-server -n $NAMESPACE
+kubectl wait --for=condition=ready pod -l component=worker -n $NAMESPACE --timeout=120s
+kubectl wait --for=condition=ready pod -l component=triggerer -n $NAMESPACE --timeout=120s
 ```
 
 **Checkpoint:**
@@ -843,6 +854,14 @@ done
 ```
 
 All four service accounts should show the IRSA role ARN.
+
+**CRITICAL: Verify IRSA is actually injected into the worker pod** (not just the SA annotation):
+
+```bash
+kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AWS_ROLE_ARN
+```
+
+This must show the IRSA role ARN. If it shows nothing, the pod was not restarted after annotation - delete it again with `kubectl delete pod airflow-worker-0 -n $NAMESPACE`.
 
 ---
 
@@ -905,35 +924,55 @@ Should show:
 
 #### 21a. Fix Generated YAML Before Applying
 
-The bootstrap generator produces YAMLs with values that do not match the actual EKS environment. Apply these fixes before deploying:
+The bootstrap generator produces YAMLs with values that do not match the actual EKS environment. Apply these fixes before deploying. **Use the Edit tool (not sed) for YAML modifications** to avoid indentation errors that break kubectl parsing.
 
-```bash
-# Fix storage class in generated bootstrap (generator uses 'gp3' but EKS uses 'efs-sc')
-sed -i.bak 's/storageClassName: gp3/storageClassName: efs-sc/g' generated_output/Demo_PSP/kubernetes-bootstrap.yaml
-rm -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml.bak
+**Fix 1: storageClassName** in `kubernetes-bootstrap.yaml`:
+- Change `storageClassName: gp3` to `storageClassName: efs-sc`
 
-# Fix service account name in generated job YAMLs (generator uses 'airflow-service-account' but Helm creates 'airflow-worker')
-sed -i.bak 's/serviceAccountName: airflow-service-account/serviceAccountName: airflow-worker/g' generated_output/Demo_PSP/*job*.yaml
-rm -f generated_output/Demo_PSP/*job*.yaml.bak
+**Fix 2: serviceAccountName** in all `*job*.yaml` files:
+- Change `serviceAccountName: airflow-service-account` to `serviceAccountName: airflow-worker`
 
-# Add required environment variables to generated job YAMLs
-# The generator only includes PYTHONPATH and AWS_REGION; rte_aws.py also needs these:
-for job_file in generated_output/Demo_PSP/*job*.yaml; do
-  # Add env vars after the AWS_REGION entry
-  sed -i.bak '/value: "us-east-1"/a\
-          - name: RTE_TARGET\
-            value: "aws"\
-          - name: MERGE_HOST\
-            value: "'$AURORA_ENDPOINT'"\
-          - name: AWS_ACCOUNT_ID\
-            value: "'$AWS_ACCOUNT_ID'"\
-          - name: NAMESPACE\
-            value: "'$NAMESPACE'"' "$job_file"
-done
-rm -f generated_output/Demo_PSP/*job*.yaml.bak
+**Fix 3: Add missing env vars** to all `*job*.yaml` files. The generator only includes `PYTHONPATH` and `AWS_REGION`. Add these env vars to the `env:` block in each job, **matching the existing indentation exactly**:
+
+```yaml
+        - name: RTE_TARGET
+          value: "aws"
+        - name: MERGE_HOST
+          value: "<AURORA_ENDPOINT>"
+        - name: AWS_ACCOUNT_ID
+          value: "<AWS_ACCOUNT_ID>"
+        - name: NAMESPACE
+          value: "<NAMESPACE>"
 ```
 
-**Note on standalone job env var naming:** The generated standalone job bash scripts export environment variables with underscores (e.g., `postgres_demo_merge_USER`) because bash cannot have hyphens in variable names. However, the DataSurface platform Python code expects hyphenated names (e.g., `postgres-demo-merge_USER`) matching the K8s `V1EnvVar` naming used by the infrastructure DAG. For initial setup, the standalone jobs may need manual fixes to pass hyphenated env var names using the `env` command. **For production use, prefer the infrastructure DAG** (which handles this correctly via K8s `V1EnvVar`) over standalone jobs.
+**IMPORTANT: Do NOT use `sed` to inject env vars into YAML files.** The generated job files have inconsistent indentation (some use 8-space, some 10-space base indent). Using `sed` to append after a pattern produces wrong indentation that breaks YAML parsing. Use the Edit tool to add env vars matching each file's existing indentation.
+
+**Fix 4: Broken bash line continuations** in generated job scripts. The generator sometimes inserts blank lines between `--flag \` continuation lines (e.g., between `--rte-name demo \` and `--use-git-cache \`). These blank lines break the bash `\` continuation, causing `--use-git-cache: command not found` errors. Remove any blank lines within multi-line bash commands.
+
+**Fix 5: Hyphenated credential env var names (REQUIRED).** The generated job bash scripts export credentials with underscored names (e.g., `export postgres_demo_merge_USER=...`) because bash cannot have hyphens in variable names. However, the DataSurface platform Python code expects hyphenated names (e.g., `postgres-demo-merge_USER`). **You must wrap the `python -m datasurface.cmd.platform` command with the `env` command** to pass hyphenated names:
+
+Change the python command in each job script from:
+```bash
+python -m datasurface.cmd.platform <command> \
+  --arg1 val1 ...
+```
+
+To:
+```bash
+env "postgres-demo-merge_USER=$postgres_demo_merge_USER" \
+    "postgres-demo-merge_PASSWORD=$postgres_demo_merge_PASSWORD" \
+    "git_TOKEN=$git_TOKEN" \
+python -m datasurface.cmd.platform <command> \
+  --arg1 val1 ...
+```
+
+**Checkpoint:** After all fixes, validate each job YAML parses correctly:
+
+```bash
+for f in generated_output/Demo_PSP/*job*.yaml; do
+  kubectl apply --dry-run=client -f "$f" && echo "$f: OK" || echo "$f: FAILED"
+done
+```
 
 #### 21b. Deploy Bootstrap and Run Jobs
 

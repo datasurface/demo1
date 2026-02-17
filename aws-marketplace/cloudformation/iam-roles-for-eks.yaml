@@ -5,23 +5,14 @@ Parameters:
   EKSOIDCProviderArn:
     Type: String
     Description: The ARN of the EKS OIDC Identity Provider.
-  EKSOIDCIssuerURL:
-    Type: String
-    Description: >-
-      The OIDC Issuer URL without the https:// prefix
-      (e.g. oidc.eks.us-east-1.amazonaws.com/id/ABCDEF1234).
-      Used as the condition key in IRSA trust policies.
   StackName:
     Type: String
     Description: The name of the main EKS stack to associate with these roles.
-  Namespace:
-    Type: String
-    Default: demo1-aws
-    Description: Kubernetes namespace for DataSurface deployment.
-  AirflowServiceAccount:
-    Type: String
-    Default: airflow-worker
-    Description: Kubernetes service account name for Airflow workers.
+
+# NOTE: OIDC scope conditions cannot be set here because CloudFormation does not
+# support intrinsic functions (!Sub) as YAML mapping keys. The roles are created
+# without scope conditions, then Step 3 of the setup-walkthrough-aws skill applies
+# the correctly scoped trust policies via AWS CLI. Do NOT skip Step 3.
 
 Resources:
   EFSCSIDriverRole:
@@ -34,10 +25,6 @@ Resources:
             Principal:
               Federated: !Ref EKSOIDCProviderArn
             Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                !Sub "${EKSOIDCIssuerURL}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa"
-                !Sub "${EKSOIDCIssuerURL}:aud": "sts.amazonaws.com"
       Policies:
         - PolicyName: EFSCSIDriverPolicy
           PolicyDocument:
@@ -67,10 +54,6 @@ Resources:
             Principal:
               Federated: !Ref EKSOIDCProviderArn
             Action: sts:AssumeRoleWithWebIdentity
-            Condition:
-              StringEquals:
-                !Sub "${EKSOIDCIssuerURL}:sub": !Sub "system:serviceaccount:${Namespace}:${AirflowServiceAccount}"
-                !Sub "${EKSOIDCIssuerURL}:aud": "sts.amazonaws.com"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/SecretsManagerReadWrite
       Tags:
