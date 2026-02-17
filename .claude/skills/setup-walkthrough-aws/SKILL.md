@@ -561,11 +561,19 @@ git tag v1.0.0-demo
 git push origin v1.0.0-demo
 ```
 
+**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** — git tags alone are not sufficient. You must create a GitHub Release from the tag:
+
+1. Go to `https://github.com/$MODEL_REPO/releases/new`
+2. Select the `v1.0.0-demo` tag
+3. Set the release title to `v1.0.0-demo`
+4. Ensure **"Set as a pre-release"** is **unchecked** (must be a stable release)
+5. Click **"Publish release"**
+
 **Checkpoint:**
 - `git remote -v` shows the target model repository
 - `git log -1` shows the configure commit
 - `git tag` shows `v1.0.0-demo`
-- Verify on GitHub that the repository has updated files AND the tag exists
+- Verify on GitHub that the repository has the tag AND a **published Release** (not pre-release) for `v1.0.0-demo`
 
 ---
 
