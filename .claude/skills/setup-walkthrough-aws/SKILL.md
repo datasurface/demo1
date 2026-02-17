@@ -485,6 +485,10 @@ export AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
   --output text --region $AWS_REGION)
 
+# Switch eco.py to use the AWS RTE instead of local
+sed -i.bak "s|from rte_demo import createDemoRTE|from rte_aws import createDemoRTE|g" eco.py
+rm -f eco.py.bak
+
 # Replace placeholders in rte_aws.py (model configuration)
 sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" rte_aws.py
 sed -i.bak "s|PLACEHOLDER_AWS_ACCOUNT_ID|$AWS_ACCOUNT_ID|g" rte_aws.py
@@ -512,9 +516,10 @@ rm -f helm/airflow-values-aws.yaml.bak
 
 ```bash
 grep PLACEHOLDER rte_aws.py helm/airflow-values-aws.yaml
+grep rte_demo eco.py
 ```
 
-Should return no matches (all PLACEHOLDERs replaced).
+Both should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws).
 
 ---
 
