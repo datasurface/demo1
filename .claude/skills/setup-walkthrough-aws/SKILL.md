@@ -548,13 +548,13 @@ All should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws)
 
 ---
 
-### Step 11: Airflow Image (Optional - Skip for Standard Deployments)
+### Step 11: Airflow Image (Skip if Merge Database is PostgreSQL)
 
-The standard `apache/airflow:3.1.7` image works for most deployments. The Helm values file already references this image.
+The standard `apache/airflow:3.1.7` image includes the PostgreSQL driver. **If your merge database is PostgreSQL (the default for Aurora), skip this step.**
 
-**Only build a custom image if** you need additional database drivers (MSSQL, Oracle, DB2) or specific Python packages not in the standard image. The Dockerfile (`Docker.airflow_with_drivers`) is located in the DataSurface Python package at `src/datasurface/platforms/yellow/docker/`, NOT in this model repository.
+**A custom image is required when the merge database is NOT PostgreSQL** (e.g. SQL Server on Azure, Oracle, DB2). The infrastructure DAG dynamically creates DAGs using records in the merge database, and Airflow worker pods need the appropriate database driver to connect. Without it, the generated DAGs will fail at runtime.
 
-**For standard deployments, skip this step entirely.**
+The Dockerfile (`Docker.airflow_with_drivers`) is located in the DataSurface Python package at `src/datasurface/platforms/yellow/docker/`, NOT in this model repository. If you need it, build and push the custom image, then update `images.airflow.repository` and `images.airflow.tag` in `helm/airflow-values-aws.yaml` before Step 10's placeholder replacement.
 
 ---
 
@@ -1234,17 +1234,17 @@ If this fails, check:
 
 ---
 
-### Missing AWS Dependencies in Airflow Image
+### Missing Database Drivers in Airflow Image
 
-**Symptoms:** DAGs fail with `ModuleNotFoundError: No module named 'boto3'` or similar.
+**Symptoms:** Dynamically generated DAGs fail with connection errors like `ModuleNotFoundError: No module named 'pymssql'` or similar database driver errors.
 
-The standard `apache/airflow:3.1.7` image includes `boto3` and the Amazon provider. Verify:
+The standard `apache/airflow:3.1.7` image only includes the PostgreSQL driver. If your merge database is SQL Server, Oracle, or DB2, the worker pods need the corresponding driver to connect. Build the custom image (see Step 11) with the required drivers.
+
+Verify what drivers are available:
 
 ```bash
-kubectl exec -n $NAMESPACE deployment/airflow-scheduler -c scheduler -- pip list 2>&1 | grep -E "(boto3|apache-airflow-providers-amazon)"
+kubectl exec -n $NAMESPACE deployment/airflow-scheduler -c scheduler -- pip list 2>&1 | grep -E "(pymssql|cx.Oracle|ibm.db|psycopg)"
 ```
-
-If missing, you may need to build a custom image (see Step 11) or install packages at runtime via the Helm `extraPipPackages` option.
 
 ---
 
@@ -1296,7 +1296,7 @@ If the secret or imagePullSecrets binding is missing, re-run Step 16.
 | Storage | standard/hostpath | EFS (efs-sc) |
 | Infrastructure | None | CloudFormation (2 stacks) |
 | Auth | None | IRSA (IAM Roles for Service Accounts) |
-| Airflow image | apache/airflow:3.1.7 | apache/airflow:3.1.7 (standard; custom optional) |
+| Airflow image | apache/airflow:3.1.7 | Standard if merge DB is PostgreSQL; custom if MSSQL/Oracle/DB2 |
 | Git cache | ReadWriteOnce | ReadWriteMany |
 | Network | localhost | VPC + security groups |
 | Node type | Docker Desktop | EC2 (m5.xlarge recommended) |
