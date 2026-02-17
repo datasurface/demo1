@@ -470,9 +470,9 @@ else:
 
 ---
 
-### Step 10: Customize helm/airflow-values-aws.yaml
+### Step 10: Customize Model and Helm Values
 
-Get CloudFormation outputs and replace PLACEHOLDERs in the Helm values file:
+Get CloudFormation outputs and replace PLACEHOLDERs in both `rte_aws.py` and the Helm values file:
 
 ```bash
 export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
@@ -485,6 +485,12 @@ export AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
   --output text --region $AWS_REGION)
 
+# Replace placeholders in rte_aws.py (model configuration)
+sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" rte_aws.py
+sed -i.bak "s|PLACEHOLDER_AWS_ACCOUNT_ID|$AWS_ACCOUNT_ID|g" rte_aws.py
+sed -i.bak "s|PLACEHOLDER_NAMESPACE|$NAMESPACE|g" rte_aws.py
+rm -f rte_aws.py.bak
+
 # Replace placeholders in Helm values
 sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" helm/airflow-values-aws.yaml
 sed -i.bak "s|PLACEHOLDER_DB_PASSWORD|$DATABASE_PASSWORD|g" helm/airflow-values-aws.yaml
@@ -496,14 +502,16 @@ rm -f helm/airflow-values-aws.yaml.bak
 
 **Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
 
-**Note:** The values file includes `sslmode: require` in the `metadataConnection` block. This is required for Aurora/RDS connections and should not be removed. If you see `SSL connection is required` errors from Airflow, verify this field is present.
+**IMPORTANT:** The `rte_aws.py` values are baked into the model and committed to the repository. Task pods spawned by the infrastructure DAG load the model from git at runtime and do NOT have access to environment variables like `MERGE_HOST` or `AWS_ACCOUNT_ID`. All deployment-specific values must be string literals in the committed file, not `os.environ` lookups.
 
-**Note:** The values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region. Without these env vars, boto3 cannot determine the region and Secrets Manager calls fail. The `PLACEHOLDER_AWS_REGION` values are replaced by the `sed` command above.
+**Note:** The Helm values file includes `sslmode: require` in the `metadataConnection` block. This is required for Aurora/RDS connections and should not be removed.
+
+**Note:** The Helm values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region.
 
 **Checkpoint:**
 
 ```bash
-grep PLACEHOLDER helm/airflow-values-aws.yaml
+grep PLACEHOLDER rte_aws.py helm/airflow-values-aws.yaml
 ```
 
 Should return no matches (all PLACEHOLDERs replaced).

@@ -3,24 +3,8 @@ Copyright (c) 2026 DataSurface Inc. All Rights Reserved.
 Proprietary Software - See LICENSE.txt for terms.
 
 AWS EKS runtime environment configuration for DataSurface Yellow.
-All AWS-specific values are read from environment variables so the same
-file works across different AWS deployments without modification.
-
-Required environment variables:
-  MERGE_HOST       - Aurora/RDS endpoint for merge database
-  AWS_ACCOUNT_ID   - 12-digit AWS account ID
-
-Optional environment variables:
-  NAMESPACE              - K8s namespace (default: demo1-aws)
-  AIRFLOW_HOST           - Aurora/RDS endpoint for Airflow DB (default: same as MERGE_HOST)
-  AIRFLOW_PORT           - Airflow DB port (default: 5432)
-  MERGE_PORT             - Merge DB port (default: 5432)
-  MERGE_DBNAME           - Merge database name (default: merge_db)
-  AIRFLOW_SERVICE_ACCOUNT - Helm Airflow worker service account (default: airflow-worker)
-  DATASURFACE_VERSION    - DataSurface image version (default: 1.1.0)
+PLACEHOLDER values are replaced by the setup-walkthrough-aws skill during deployment.
 """
-
-import os
 
 from datasurface.dsl import ProductionStatus, \
     RuntimeEnvironment, Ecosystem, PSPDeclaration, \
@@ -34,16 +18,16 @@ from datasurface.platforms.yellow.aws_assembly import YellowAWSExternalAirflow3A
 from datasurface.platforms.yellow.assembly import GitCacheConfig
 from datasurface.repos import VersionPatternReleaseSelector, GitHubRepository, ReleaseType, VersionPatterns
 
-# AWS configuration from environment variables
-KUB_NAME_SPACE: str = os.environ.get("NAMESPACE", "demo1-aws")
-AIRFLOW_SERVICE_ACCOUNT: str = os.environ.get("AIRFLOW_SERVICE_ACCOUNT", "airflow-worker")
-MERGE_HOST: str = os.environ["MERGE_HOST"]
-MERGE_PORT: int = int(os.environ.get("MERGE_PORT", "5432"))
-MERGE_DBNAME: str = os.environ.get("MERGE_DBNAME", "merge_db")
-AIRFLOW_HOST: str = os.environ.get("AIRFLOW_HOST", MERGE_HOST)
-AIRFLOW_PORT: int = int(os.environ.get("AIRFLOW_PORT", "5432"))
-AWS_ACCOUNT_ID: str = os.environ["AWS_ACCOUNT_ID"]
-DATASURFACE_VERSION: str = os.environ.get("DATASURFACE_VERSION", "1.1.0")
+# AWS configuration - replaced by setup-walkthrough-aws skill
+KUB_NAME_SPACE: str = "PLACEHOLDER_NAMESPACE"
+MERGE_HOST: str = "PLACEHOLDER_AURORA_ENDPOINT"
+MERGE_PORT: int = 5432
+MERGE_DBNAME: str = "merge_db"
+AIRFLOW_HOST: str = "PLACEHOLDER_AURORA_ENDPOINT"
+AIRFLOW_PORT: int = 5432
+AWS_ACCOUNT_ID: str = "PLACEHOLDER_AWS_ACCOUNT_ID"
+DATASURFACE_VERSION: str = "1.1.0"
+AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:
