@@ -534,6 +534,8 @@ rm -f helm/airflow-values-aws.yaml.bak
 
 **Note:** The Helm values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region.
 
+**SECURITY WARNING:** The Helm values file now contains the real database password. **Do NOT commit `helm/airflow-values-aws.yaml` to git.** It is used locally for `helm install` only. Only `eco.py` and `rte_aws.py` need to be pushed (the DAG and jobs load the model from git at runtime, but never read the Helm values).
+
 **Checkpoint:**
 
 ```bash
@@ -580,8 +582,10 @@ git tag -l | xargs git tag -d 2>/dev/null || true
 
 #### 12b. Commit, push, and tag
 
+**Do NOT commit `helm/airflow-values-aws.yaml`** - it contains the database password. Only commit model files.
+
 ```bash
-git add eco.py rte_aws.py helm/airflow-values-aws.yaml
+git add eco.py rte_aws.py
 git commit -m "Configure model for AWS EKS deployment"
 git push -u origin main --force
 
