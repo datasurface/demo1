@@ -1,0 +1,718 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DataSurface - Complete Data Ecosystem Broker Platform on AWS EKS'
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: m5.4xlarge
+    AllowedValues: [t3.medium, t3.large, m5.large, m5.xlarge, m5.2xlarge, m5.4xlarge]
+    Description: EC2 instance type for EKS worker nodes (ignored if using Fargate)
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access to worker nodes (ignored if using Fargate)
+    
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+    
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for the first public subnet
+    
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR block for the second public subnet
+    
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: CIDR block for the first private subnet
+    
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.4.0/24
+    Description: CIDR block for the second private subnet
+    
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    Description: Password for the PostgreSQL database (8-128 characters)
+    
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub Personal Access Token for repository access
+    
+  KubernetesDeploymentType:
+    Type: String
+    Default: EKS-EC2
+    AllowedValues: [EKS-EC2, EKS-Fargate]
+    Description: Choose between EKS with EC2 nodes or EKS with Fargate (serverless)
+    
+  CreateDatabase:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Whether to create a new PostgreSQL database (set to false to use existing database)
+    
+  EKSVersion:
+    Type: String
+    Default: '1.32'
+    AllowedValues: ['1.32', '1.33']
+    Description: EKS cluster version
+
+Conditions:
+  UseFargate: !Equals [!Ref KubernetesDeploymentType, 'EKS-Fargate']
+  UseEC2Nodes: !Equals [!Ref KubernetesDeploymentType, 'EKS-EC2']
+  CreateDatabaseCondition: !Equals [!Ref CreateDatabase, 'true']
+
+Resources:
+  # VPC and Networking
+  DataSurfaceVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref DataSurfaceVPC
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet-2"
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-2"
+
+  # NAT Gateways
+  NATGateway1EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-eip-1"
+
+  NATGateway2EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-eip-2"
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-gateway-1"
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-gateway-2"
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-routes"
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-routes-1"
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DataSurfaceVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-routes-2"
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  # Security Groups
+  EKSClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-eks-cluster-sg"
+      GroupDescription: Security group for EKS cluster control plane
+      VpcId: !Ref DataSurfaceVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: HTTPS access to EKS API from VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eks-cluster-sg"
+
+  # RDS Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Condition: CreateDatabaseCondition
+    Properties:
+      DBSubnetGroupDescription: Subnet group for DataSurface RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-db-subnet-group"
+
+  # RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateDatabaseCondition
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-rds-sg"
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId: !Ref DataSurfaceVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+          Description: PostgreSQL access from EKS cluster
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-rds-sg"
+
+  # RDS PostgreSQL Database
+  PostgreSQLDatabase:
+    Type: AWS::RDS::DBInstance
+    Condition: CreateDatabaseCondition
+    Properties:
+      DBInstanceIdentifier: !Sub "${AWS::StackName}-postgres"
+      DBInstanceClass: db.t3.medium
+      Engine: postgres
+      EngineVersion: '16.10'
+      AllocatedStorage: 100
+      StorageType: gp2
+      StorageEncrypted: true
+      MasterUsername: postgres
+      MasterUserPassword: !Ref DatabasePassword
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+      PubliclyAccessible: false
+      DeletionProtection: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-postgres"
+
+  # S3 Bucket for DataSurface storage
+  DataSurfaceS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "datasurface-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-s3-bucket"
+
+  # EKS Cluster IAM Role
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eks-cluster-role"
+
+  # EKS Node Group IAM Role (for EC2 nodes)
+  EKSNodeGroupRole:
+    Type: AWS::IAM::Role
+    Condition: UseEC2Nodes
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: DataSurfaceS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${DataSurfaceS3Bucket}/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${DataSurfaceS3Bucket}"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eks-nodegroup-role"
+
+  # EKS Fargate IAM Role
+  EKSFargateRole:
+    Type: AWS::IAM::Role
+    Condition: UseFargate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks-fargate-pods.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eks-fargate-role"
+
+  # EKS Cluster
+  DataSurfaceEKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub "${AWS::StackName}-eks-cluster"
+      Version: !Ref EKSVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+          - !Ref EKSClusterSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eks-cluster"
+
+  # OIDC Identity Provider for EKS (required for IRSA)
+  EKSOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt DataSurfaceEKSCluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 9e99a48a9960b14926bb7f3b02e22da2b0ab7280 # Standard thumbprint for us-east-1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-oidc-provider"
+
+  # EKS Node Group (for EC2 deployment)
+  DataSurfaceNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Condition: UseEC2Nodes
+    DependsOn: DataSurfaceEKSCluster
+    Properties:
+      ClusterName: !Ref DataSurfaceEKSCluster
+      NodegroupName: !Sub "${AWS::StackName}-nodegroup"
+      NodeRole: !GetAtt EKSNodeGroupRole.Arn
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      InstanceTypes:
+        - !Ref InstanceType
+      AmiType: AL2_x86_64
+      CapacityType: ON_DEMAND
+      DiskSize: 100
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 5
+        DesiredSize: 2
+      UpdateConfig:
+        MaxUnavailable: 1
+      RemoteAccess:
+        Ec2SshKey: !Ref KeyPairName
+      Tags:
+        Environment: !Sub "${AWS::StackName}"
+        Project: DataSurface
+
+  # EKS Fargate Profile (for Fargate deployment)
+  DataSurfaceFargateProfile:
+    Type: AWS::EKS::FargateProfile
+    Condition: UseFargate
+    DependsOn: DataSurfaceEKSCluster
+    Properties:
+      ClusterName: !Ref DataSurfaceEKSCluster
+      FargateProfileName: !Sub "${AWS::StackName}-fargate-profile"
+      PodExecutionRoleArn: !GetAtt EKSFargateRole.Arn
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Selectors:
+        - Namespace: datasurface
+        - Namespace: kube-system
+          Labels:
+            - Key: k8s-app
+              Value: kube-dns
+      Tags:
+        - Key: Environment
+          Value: !Sub "${AWS::StackName}"
+        - Key: Project
+          Value: DataSurface
+
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-alb-sg"
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref DataSurfaceVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP traffic from internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS traffic from internet
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  # Application Load Balancer
+  DataSurfaceALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb"
+
+  # ALB Target Group
+  DataSurfaceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-tg"
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref DataSurfaceVPC
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-tg"
+
+  # ALB Listener
+  DataSurfaceALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DataSurfaceALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DataSurfaceTargetGroup
+
+  # EFS File System for shared storage
+  DataSurfaceEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: provisioned
+      ProvisionedThroughputInMibps: 100
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-efs"
+        - Key: Purpose
+          Value: "DataSurface shared storage"
+
+  # EFS Security Group
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EFS mount targets
+      VpcId: !Ref DataSurfaceVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref EKSClusterSecurityGroup
+          Description: "Allow NFS access from EKS cluster"
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          CidrIp: 10.0.0.0/16
+          Description: "Allow NFS access from VPC CIDR (includes node groups)"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-efs-sg"
+
+  # EFS Mount Targets
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref DataSurfaceEFS
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref DataSurfaceEFS
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  # EFS Access Point for Kubernetes
+  DataSurfaceEFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref DataSurfaceEFS
+      PosixUser:
+        Uid: 50000
+        Gid: 50000
+      RootDirectory:
+        Path: "/datasurface"
+        CreationInfo:
+          OwnerUid: 50000
+          OwnerGid: 50000
+          Permissions: "0755"
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-efs-ap"
+        - Key: Purpose
+          Value: "DataSurface Kubernetes access point"
+
+Outputs:
+  EKSClusterName:
+    Description: Name of the EKS cluster
+    Value: !Ref DataSurfaceEKSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-EKSClusterName"
+
+  EKSClusterEndpoint:
+    Description: EKS cluster endpoint
+    Value: !GetAtt DataSurfaceEKSCluster.Endpoint
+    Export:
+      Name: !Sub "${AWS::StackName}-EKSClusterEndpoint"
+
+  DatabaseEndpoint:
+    Condition: CreateDatabaseCondition
+    Description: RDS PostgreSQL Database Endpoint
+    Value: !GetAtt PostgreSQLDatabase.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-DatabaseEndpoint"
+
+  S3Bucket:
+    Description: S3 Bucket for DataSurface storage
+    Value: !Ref DataSurfaceS3Bucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Bucket"
+
+  LoadBalancerURL:
+    Description: URL to access DataSurface via Load Balancer
+    Value: !Sub "http://${DataSurfaceALB.DNSName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-LoadBalancerURL"
+
+  KubernetesDeploymentType:
+    Description: Type of Kubernetes deployment used
+    Value: !Ref KubernetesDeploymentType
+
+  EFSFileSystemId:
+    Description: EFS File System ID for shared storage
+    Value: !Ref DataSurfaceEFS
+    Export:
+      Name: !Sub "${AWS::StackName}-EFS-FileSystemId"
+
+  EFSAccessPointId:
+    Description: EFS Access Point ID for Kubernetes storage
+    Value: !Ref DataSurfaceEFSAccessPoint
+    Export:
+      Name: !Sub "${AWS::StackName}-EFS-AccessPointId"
+
+  EKSOIDCProviderArn:
+    Description: ARN of the EKS OIDC Identity Provider
+    Value: !Ref EKSOIDCProvider
+    Export:
+      Name: !Sub "${AWS::StackName}-OIDCProviderArn"
+
+  EKSOIDCIssuerURL:
+    Description: OIDC Issuer URL without https:// prefix (for IAM trust policy condition keys)
+    Value: !Select [1, !Split ["//", !GetAtt DataSurfaceEKSCluster.OpenIdConnectIssuerUrl]]
+    Export:
+      Name: !Sub "${AWS::StackName}-OIDCIssuerURL"
+
+  NextSteps:
+    Description: Next steps to complete DataSurface setup
+    Value: !Sub 
+      - "1. Configure kubectl: aws eks update-kubeconfig --region ${AWS::Region} --name ${ClusterName} 2. Install EFS CSI driver: aws eks create-addon --cluster-name ${ClusterName} --addon-name aws-efs-csi-driver 3. Deploy DataSurface using provided Kubernetes manifests 4. Access via Load Balancer URL"
+      - ClusterName: !Ref DataSurfaceEKSCluster

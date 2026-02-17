@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DataSurface - IAM Roles for EKS Service Accounts (IRSA)'
+
+Parameters:
+  EKSOIDCProviderArn:
+    Type: String
+    Description: The ARN of the EKS OIDC Identity Provider.
+  EKSOIDCIssuerURL:
+    Type: String
+    Description: >-
+      The OIDC Issuer URL without the https:// prefix
+      (e.g. oidc.eks.us-east-1.amazonaws.com/id/ABCDEF1234).
+      Used as the condition key in IRSA trust policies.
+  StackName:
+    Type: String
+    Description: The name of the main EKS stack to associate with these roles.
+  Namespace:
+    Type: String
+    Default: demo1-aws
+    Description: Kubernetes namespace for DataSurface deployment.
+  AirflowServiceAccount:
+    Type: String
+    Default: airflow-worker
+    Description: Kubernetes service account name for Airflow workers.
+
+Resources:
+  EFSCSIDriverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref EKSOIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${EKSOIDCIssuerURL}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa"
+                !Sub "${EKSOIDCIssuerURL}:aud": "sts.amazonaws.com"
+      Policies:
+        - PolicyName: EFSCSIDriverPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:DescribeAccessPoints
+                  - elasticfilesystem:DescribeFileSystems
+                  - elasticfilesystem:DescribeMountTargets
+                  - elasticfilesystem:CreateAccessPoint
+                  - elasticfilesystem:DeleteAccessPoint
+                  - elasticfilesystem:TagResource
+                  - elasticfilesystem:UntagResource
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub "${StackName}-efs-csi-driver-role"
+
+  AirflowSecretsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref EKSOIDCProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "${EKSOIDCIssuerURL}:sub": !Sub "system:serviceaccount:${Namespace}:${AirflowServiceAccount}"
+                !Sub "${EKSOIDCIssuerURL}:aud": "sts.amazonaws.com"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Tags:
+        - Key: Name
+          Value: !Sub "${StackName}-airflow-secrets-role"
+
+Outputs:
+  EFSCSIDriverRoleArn:
+    Description: IAM Role ARN for EFS CSI Driver (for IRSA)
+    Value: !GetAtt EFSCSIDriverRole.Arn
+    Export:
+      Name: !Sub "${StackName}-EFS-CSI-Driver-Role-Arn"
+
+  AirflowSecretsRoleArn:
+    Description: IAM Role ARN for Airflow Secrets Manager access (for IRSA)
+    Value: !GetAtt AirflowSecretsRole.Arn
+    Export:
+      Name: !Sub "${StackName}-Airflow-Secrets-Role-Arn"
