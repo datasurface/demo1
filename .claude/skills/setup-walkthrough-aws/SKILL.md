@@ -142,14 +142,35 @@ export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name $STACK_NAME \
   --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' \
   --output text --region $AWS_REGION)
-
-kubectl run db-setup --rm -i --restart=Never \
-  --image=postgres:16 \
-  --env="PGPASSWORD=$DATABASE_PASSWORD" \
-  -- bash -c "psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE airflow_db;' && psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE merge_db;'"
 ```
 
-**Note:** This runs in the `default` namespace since our application namespace does not exist yet. If the `db-setup` pod cannot reach Aurora, you may need to complete Step 4 (kubeconfig) first, then return here to create the databases before proceeding to Step 19.
+**Note:** Database creation requires kubeconfig and Aurora SG access. These are configured in Step 4. If running Step 1 straight through, configure kubeconfig first (run just the `aws eks update-kubeconfig` and SG fix from Step 4), then create the databases:
+
+```bash
+kubectl run db-setup --restart=Never \
+  --image=postgres:16 \
+  --env="PGPASSWORD=$DATABASE_PASSWORD" \
+  --command -- bash -c "psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE airflow_db;' && psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE merge_db;'"
+
+sleep 15
+kubectl logs db-setup
+kubectl delete pod db-setup --ignore-not-found
+```
+
+**Note:** Use non-interactive pod + logs instead of `--rm -i` to reliably capture output. Verify both databases exist:
+
+```bash
+kubectl run db-verify --restart=Never \
+  --image=postgres:16 \
+  --env="PGPASSWORD=$DATABASE_PASSWORD" \
+  --command -- psql -h $AURORA_ENDPOINT -U postgres -c "SELECT datname FROM pg_database WHERE datname IN ('airflow_db', 'merge_db');"
+
+sleep 15
+kubectl logs db-verify
+kubectl delete pod db-verify --ignore-not-found
+```
+
+Both `airflow_db` and `merge_db` should appear in the output.
 
 ---
 
@@ -445,28 +466,21 @@ The file should already exist in the repository. It contains the AWS-specific ru
 
 ---
 
-### Step 9: Verify eco.py Has RTE_TARGET Dispatch
+### Step 9: Verify eco.py Import Line
 
 ```bash
-grep -A5 "RTE_TARGET" eco.py
+grep "from rte_" eco.py
 ```
 
-This should show the import dispatch logic that selects between `rte_demo` (local) and `rte_aws` (AWS) based on the `RTE_TARGET` environment variable. If missing, add the dispatch:
-
+The file has a comment indicating where the import swap happens:
 ```python
-import os
-
-_RTE_TARGET = os.environ.get("RTE_TARGET", "local")
-
-if _RTE_TARGET == "aws":
-    from rte_aws import createDemoRTE
-elif _RTE_TARGET == "azure":
-    from rte_azure import createDemoRTE  # type: ignore[no-redef]
-else:
-    from rte_demo import createDemoRTE  # type: ignore[no-redef]
+# For AWS deployment, the setup-walkthrough-aws skill changes this to: from rte_aws import createDemoRTE
+from rte_demo import createDemoRTE
 ```
 
-**Checkpoint:** `eco.py` imports from `rte_aws` when `RTE_TARGET=aws`.
+Change the import from `rte_demo` to `rte_aws`. This is done in Step 10 along with the other placeholder replacements.
+
+**Checkpoint:** `eco.py` contains `from rte_aws import createDemoRTE` (verified after Step 10).
 
 ---
 
@@ -487,6 +501,14 @@ export AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
 
 # Switch eco.py to use the AWS RTE instead of local
 sed -i.bak "s|from rte_demo import createDemoRTE|from rte_aws import createDemoRTE|g" eco.py
+rm -f eco.py.bak
+
+# Update eco.py with the correct GitHub repo owner and name
+# MODEL_REPO is in "owner/repo" format - split it for the two variables
+MODEL_OWNER=$(echo $MODEL_REPO | cut -d'/' -f1)
+MODEL_NAME=$(echo $MODEL_REPO | cut -d'/' -f2)
+sed -i.bak "s|GIT_REPO_OWNER: str = \"git_username\"|GIT_REPO_OWNER: str = \"$MODEL_OWNER\"|g" eco.py
+sed -i.bak "s|GIT_REPO_NAME: str = \"gitrepo_name\"|GIT_REPO_NAME: str = \"$MODEL_NAME\"|g" eco.py
 rm -f eco.py.bak
 
 # Replace placeholders in rte_aws.py (model configuration)
@@ -523,36 +545,42 @@ Both should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws
 
 ---
 
-### Step 11: Build and Push Custom Airflow Image
+### Step 11: Airflow Image (Optional - Skip for Standard Deployments)
 
-The custom image includes PostgreSQL, MSSQL, Oracle, DB2 drivers plus boto3 and AWS providers needed for AWS deployments.
+The standard `apache/airflow:3.1.7` image works for most deployments. The Helm values file already references this image.
 
-```bash
-cd /path/to/datasurface
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f src/datasurface/platforms/yellow/docker/Docker.airflow_with_drivers \
-  -t datasurface/airflow:3.1.7 \
-  --push .
-```
+**Only build a custom image if** you need additional database drivers (MSSQL, Oracle, DB2) or specific Python packages not in the standard image. The Dockerfile (`Docker.airflow_with_drivers`) is located in the DataSurface Python package at `src/datasurface/platforms/yellow/docker/`, NOT in this model repository.
 
-Verify the image contains required AWS dependencies:
-
-```bash
-docker run --rm datasurface/airflow:3.1.7 pip list | grep -E "(boto3|apache-airflow-providers-amazon|apache-airflow-providers-cncf-kubernetes)"
-```
-
-**Checkpoint:** Image is pushed and contains:
-- `boto3`
-- `apache-airflow-providers-amazon`
-- `apache-airflow-providers-cncf-kubernetes`
+**For standard deployments, skip this step entirely.**
 
 ---
 
 ### Step 12: Push Model to Repository and Tag
 
+#### 12a. Scrub existing tags and releases from the model repo
+
+**IMPORTANT:** Old tags (e.g. `v1.0.1-demo`) will cause the infrastructure DAG to pick the wrong version. Delete ALL existing remote tags before pushing the new one.
+
+**Do NOT use `gh` CLI** - it is typically not authenticated. Use `git` commands only for tag operations.
+
 ```bash
 git remote set-url origin https://github.com/$MODEL_REPO.git
 
+# Delete ALL existing remote tags
+git ls-remote --tags origin | awk '{print $2}' | sed 's|refs/tags/||' | while read tag; do
+  echo "Deleting remote tag: $tag"
+  git push origin --delete "$tag"
+done
+
+# Delete all local tags to avoid stale references
+git tag -l | xargs git tag -d 2>/dev/null || true
+```
+
+**Note:** If there are existing GitHub **Releases** tied to old tags, the user must delete them manually via the GitHub web UI at `https://github.com/$MODEL_REPO/releases` before proceeding. The GitHub API and `gh` CLI typically require elevated token permissions for release deletion that standard PATs do not have.
+
+#### 12b. Commit, push, and tag
+
+```bash
 git add eco.py rte_aws.py helm/airflow-values-aws.yaml
 git commit -m "Configure model for AWS EKS deployment"
 git push -u origin main --force
@@ -561,7 +589,11 @@ git tag v1.0.0-demo
 git push origin v1.0.0-demo
 ```
 
-**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** — git tags alone are not sufficient. You must create a GitHub Release from the tag:
+#### 12c. Create a GitHub Release (MANUAL STEP)
+
+**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** - git tags alone are not sufficient.
+
+**Do NOT attempt to create releases via `gh` CLI or the GitHub API** - the user's PAT typically lacks the required permissions. Instead, ask the user to create the release manually:
 
 1. Go to `https://github.com/$MODEL_REPO/releases/new`
 2. Select the `v1.0.0-demo` tag
@@ -569,11 +601,13 @@ git push origin v1.0.0-demo
 4. Ensure **"Set as a pre-release"** is **unchecked** (must be a stable release)
 5. Click **"Publish release"**
 
+**Wait for the user to confirm the release is created before proceeding.**
+
 **Checkpoint:**
 - `git remote -v` shows the target model repository
 - `git log -1` shows the configure commit
-- `git tag` shows `v1.0.0-demo`
-- Verify on GitHub that the repository has the tag AND a **published Release** (not pre-release) for `v1.0.0-demo`
+- `git tag` shows only `v1.0.0-demo` (no stale tags)
+- User confirms the GitHub Release is published (not pre-release)
 
 ---
 
@@ -1197,17 +1231,17 @@ If this fails, check:
 
 ---
 
-### Custom Image Missing AWS Dependencies
+### Missing AWS Dependencies in Airflow Image
 
 **Symptoms:** DAGs fail with `ModuleNotFoundError: No module named 'boto3'` or similar.
 
-Verify the custom Airflow image has required packages:
+The standard `apache/airflow:3.1.7` image includes `boto3` and the Amazon provider. Verify:
 
 ```bash
-docker run --rm datasurface/airflow:3.1.7 pip list | grep -E "(boto3|apache-airflow-providers-amazon)"
+kubectl exec -n $NAMESPACE deployment/airflow-scheduler -c scheduler -- pip list 2>&1 | grep -E "(boto3|apache-airflow-providers-amazon)"
 ```
 
-If missing, rebuild the image (Step 11) and update the Helm values to use the custom image.
+If missing, you may need to build a custom image (see Step 11) or install packages at runtime via the Helm `extraPipPackages` option.
 
 ---
 
@@ -1259,7 +1293,7 @@ If the secret or imagePullSecrets binding is missing, re-run Step 16.
 | Storage | standard/hostpath | EFS (efs-sc) |
 | Infrastructure | None | CloudFormation (2 stacks) |
 | Auth | None | IRSA (IAM Roles for Service Accounts) |
-| Airflow image | apache/airflow:3.1.7 | datasurface/airflow:3.1.7 (custom) |
+| Airflow image | apache/airflow:3.1.7 | apache/airflow:3.1.7 (standard; custom optional) |
 | Git cache | ReadWriteOnce | ReadWriteMany |
 | Network | localhost | VPC + security groups |
 | Node type | Docker Desktop | EC2 (m5.xlarge recommended) |
