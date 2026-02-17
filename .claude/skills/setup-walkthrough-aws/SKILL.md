@@ -517,13 +517,15 @@ sed -i.bak "s|PLACEHOLDER_AWS_ACCOUNT_ID|$AWS_ACCOUNT_ID|g" rte_aws.py
 sed -i.bak "s|PLACEHOLDER_NAMESPACE|$NAMESPACE|g" rte_aws.py
 rm -f rte_aws.py.bak
 
-# Replace placeholders in Helm values
-sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" helm/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_DB_PASSWORD|$DATABASE_PASSWORD|g" helm/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" helm/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_ROLE_ARN|$AIRFLOW_ROLE_ARN|g" helm/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AWS_REGION|$AWS_REGION|g" helm/airflow-values-aws.yaml
-rm -f helm/airflow-values-aws.yaml.bak
+# Create a temporary copy of Helm values and replace placeholders there.
+# The original file stays clean with PLACEHOLDERs so credentials never touch the working tree.
+cp helm/airflow-values-aws.yaml /tmp/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" /tmp/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_DB_PASSWORD|$DATABASE_PASSWORD|g" /tmp/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" /tmp/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_AIRFLOW_ROLE_ARN|$AIRFLOW_ROLE_ARN|g" /tmp/airflow-values-aws.yaml
+sed -i.bak "s|PLACEHOLDER_AWS_REGION|$AWS_REGION|g" /tmp/airflow-values-aws.yaml
+rm -f /tmp/airflow-values-aws.yaml.bak
 ```
 
 **Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
@@ -534,16 +536,15 @@ rm -f helm/airflow-values-aws.yaml.bak
 
 **Note:** The Helm values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region.
 
-**SECURITY WARNING:** The Helm values file now contains the real database password. **Do NOT commit `helm/airflow-values-aws.yaml` to git.** It is used locally for `helm install` only. Only `eco.py` and `rte_aws.py` need to be pushed (the DAG and jobs load the model from git at runtime, but never read the Helm values).
-
 **Checkpoint:**
 
 ```bash
-grep PLACEHOLDER rte_aws.py helm/airflow-values-aws.yaml
+grep PLACEHOLDER rte_aws.py
+grep PLACEHOLDER /tmp/airflow-values-aws.yaml
 grep rte_demo eco.py
 ```
 
-Both should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws).
+All should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws). The original `helm/airflow-values-aws.yaml` in the working tree should still have PLACEHOLDERs.
 
 ---
 
@@ -581,8 +582,6 @@ git tag -l | xargs git tag -d 2>/dev/null || true
 **Note:** If there are existing GitHub **Releases** tied to old tags, the user must delete them manually via the GitHub web UI at `https://github.com/$MODEL_REPO/releases` before proceeding. The GitHub API and `gh` CLI typically require elevated token permissions for release deletion that standard PATs do not have.
 
 #### 12b. Commit, push, and tag
-
-**Do NOT commit `helm/airflow-values-aws.yaml`** - it contains the database password. Only commit model files.
 
 ```bash
 git add eco.py rte_aws.py
@@ -818,7 +817,7 @@ helm repo add apache-airflow https://airflow.apache.org
 helm repo update
 
 helm install airflow apache-airflow/airflow \
-  -f helm/airflow-values-aws.yaml \
+  -f /tmp/airflow-values-aws.yaml \
   -n $NAMESPACE \
   --timeout 10m
 ```
@@ -1166,7 +1165,7 @@ The default worker memory limit of 2Gi is insufficient when workers execute Kube
 
 ```bash
 helm upgrade airflow apache-airflow/airflow \
-  -f helm/airflow-values-aws.yaml \
+  -f /tmp/airflow-values-aws.yaml \
   --set workers.resources.requests.memory=2Gi \
   --set workers.resources.limits.memory=4Gi \
   --set workers.resources.limits.cpu=2000m \
