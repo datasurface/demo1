@@ -675,33 +675,6 @@ Should contain:
 
 ---
 
-### Step 15: Fix IAM Role ARN in Generated YAML (PROACTIVE)
-
-The generated YAML may contain a hardcoded role name that does not match CloudFormation's auto-generated name. This step ensures the correct ARN is used.
-
-```bash
-# Get actual role ARN from CloudFormation
-ACTUAL_ROLE_ARN=$(aws cloudformation describe-stacks \
-  --stack-name "${STACK_NAME}-iam-roles" \
-  --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
-  --output text --region $AWS_REGION)
-
-# Replace any hardcoded role references in generated YAML
-sed -i.bak "s|arn:aws:iam::${AWS_ACCOUNT_ID}:role/airflow-secrets-role|${ACTUAL_ROLE_ARN}|g" \
-  generated_output/Demo_PSP/kubernetes-bootstrap.yaml
-rm -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml.bak
-```
-
-**Checkpoint:**
-
-```bash
-grep "role-arn" generated_output/Demo_PSP/kubernetes-bootstrap.yaml
-```
-
-The role ARN in the YAML should match the actual CloudFormation output (`$ACTUAL_ROLE_ARN`).
-
----
-
 ## Phase 5: Deploy to EKS
 
 ### Step 16: Create Namespace and Registry Secret
@@ -930,57 +903,27 @@ Should show:
 
 **IMPORTANT:** Jobs must run sequentially. The ring1-init job creates database tables that model-merge depends on. Running them simultaneously causes a race condition where model-merge fails trying to access non-existent tables.
 
-#### 21a. Fix Generated YAML Before Applying
+#### 21a. Validate Generated YAML
 
-The bootstrap generator produces YAMLs with values that do not match the actual EKS environment. Apply these fixes before deploying. **Use the Edit tool (not sed) for YAML modifications** to avoid indentation errors that break kubectl parsing.
-
-**Fix 1: storageClassName** in `kubernetes-bootstrap.yaml`:
-- Change `storageClassName: gp3` to `storageClassName: efs-sc`
-
-**Fix 2: serviceAccountName** in all `*job*.yaml` files:
-- Change `serviceAccountName: airflow-service-account` to `serviceAccountName: airflow-worker`
-
-**Fix 3: Add missing env vars** to all `*job*.yaml` files. The generator only includes `PYTHONPATH` and `AWS_REGION`. Add these env vars to the `env:` block in each job, **matching the existing indentation exactly**:
-
-```yaml
-        - name: RTE_TARGET
-          value: "aws"
-        - name: MERGE_HOST
-          value: "<AURORA_ENDPOINT>"
-        - name: AWS_ACCOUNT_ID
-          value: "<AWS_ACCOUNT_ID>"
-        - name: NAMESPACE
-          value: "<NAMESPACE>"
-```
-
-**IMPORTANT: Do NOT use `sed` to inject env vars into YAML files.** The generated job files have inconsistent indentation (some use 8-space, some 10-space base indent). Using `sed` to append after a pattern produces wrong indentation that breaks YAML parsing. Use the Edit tool to add env vars matching each file's existing indentation.
-
-**Fix 4: Broken bash line continuations** in generated job scripts. The generator sometimes inserts blank lines between `--flag \` continuation lines (e.g., between `--rte-name demo \` and `--use-git-cache \`). These blank lines break the bash `\` continuation, causing `--use-git-cache: command not found` errors. Remove any blank lines within multi-line bash commands.
-
-**Fix 5: Hyphenated credential env var names (REQUIRED).** The generated job bash scripts export credentials with underscored names (e.g., `export postgres_demo_merge_USER=...`) because bash cannot have hyphens in variable names. However, the DataSurface platform Python code expects hyphenated names (e.g., `postgres-demo-merge_USER`). **You must wrap the `python -m datasurface.cmd.platform` command with the `env` command** to pass hyphenated names:
-
-Change the python command in each job script from:
-```bash
-python -m datasurface.cmd.platform <command> \
-  --arg1 val1 ...
-```
-
-To:
-```bash
-env "postgres-demo-merge_USER=$postgres_demo_merge_USER" \
-    "postgres-demo-merge_PASSWORD=$postgres_demo_merge_PASSWORD" \
-    "git_TOKEN=$git_TOKEN" \
-python -m datasurface.cmd.platform <command> \
-  --arg1 val1 ...
-```
-
-**Checkpoint:** After all fixes, validate each job YAML parses correctly:
+The generated YAMLs should be ready to use directly. Verify they look correct:
 
 ```bash
-for f in generated_output/Demo_PSP/*job*.yaml; do
+# Verify storageClassName is efs-sc (not gp3)
+grep storageClassName generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+
+# Verify serviceAccountName is airflow-worker (not airflow-service-account)
+grep serviceAccountName generated_output/Demo_PSP/*job*.yaml
+
+# Verify env wrapper for hyphenated credential names exists
+grep 'env "postgres-demo-merge' generated_output/Demo_PSP/*job*.yaml
+
+# Validate all YAMLs parse correctly
+for f in generated_output/Demo_PSP/*.yaml; do
   kubectl apply --dry-run=client -f "$f" && echo "$f: OK" || echo "$f: FAILED"
 done
 ```
+
+If any of these checks fail, you may be using an older DataSurface image. Pull the latest v1.1.0 image and regenerate (Step 14).
 
 #### 21b. Deploy Bootstrap and Run Jobs
 
