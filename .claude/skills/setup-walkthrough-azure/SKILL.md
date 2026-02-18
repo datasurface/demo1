@@ -29,7 +29,7 @@ Ask the user for these environment variables if not already set:
 
 ```bash
 AZURE_SUBSCRIPTION_ID    # Azure subscription ID
-AZURE_REGION             # Azure region (e.g., eastus)
+AZURE_REGION             # Azure region (recommend westus2 - see Region Selection note below)
 RESOURCE_GROUP           # Resource group name (e.g., ds-demo-rg)
 CLUSTER_NAME             # AKS cluster name (e.g., ds-demo-aks)
 VNET_NAME                # VNet name (e.g., ds-vnet)
@@ -60,6 +60,32 @@ Set the active subscription:
 ```bash
 az account set --subscription $AZURE_SUBSCRIPTION_ID
 ```
+
+**IMPORTANT: Region Selection.** Azure periodically restricts new database provisioning in popular regions (especially eastus). Both PostgreSQL Flexible Server and Azure SQL Database can be blocked simultaneously. **Recommend `westus2` as the default region** -- it has broad service availability and fewer provisioning restrictions. If your chosen region fails with `RegionDoesNotAllowProvisioning` or "location is restricted for provisioning", you must tear down and recreate everything in a different region. All resources (VNet, AKS, PostgreSQL, SQL) must be in the same region for VNet integration to work. Cross-region VNet rules and VNet-integrated PostgreSQL are not supported.
+
+**IMPORTANT: Pre-register Azure resource providers.** New subscriptions often lack provider registrations, which causes `MissingSubscriptionRegistration` errors during resource creation. Register all needed providers upfront (takes 1-2 minutes):
+
+```bash
+az provider register --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.DBforPostgreSQL
+az provider register --namespace Microsoft.Sql
+az provider register --namespace Microsoft.KeyVault
+az provider register --namespace Microsoft.ManagedIdentity
+az provider register --namespace Microsoft.Storage
+az provider register --namespace Microsoft.Network
+
+# Wait for the critical one (AKS)
+while [ "$(az provider show -n Microsoft.ContainerService --query registrationState -o tsv)" != "Registered" ]; do sleep 10; done
+echo "ContainerService registered"
+```
+
+**IMPORTANT: Check vCPU quota.** New Azure subscriptions typically have a 10 vCPU regional quota. Our default config (3 x Standard_D2s_v3 = 6 cores) fits within this. If you need larger VMs, check your quota first:
+
+```bash
+az vm list-usage --location $AZURE_REGION -o table | grep "Total Regional"
+```
+
+If your quota is less than the cores you need, request an increase via the Azure Portal before proceeding.
 
 ---
 
@@ -206,13 +232,19 @@ az aks create \
   --resource-group $RESOURCE_GROUP \
   --name $CLUSTER_NAME \
   --node-count 3 \
-  --node-vm-size Standard_D4s_v3 \
+  --node-vm-size Standard_D2s_v3 \
   --vnet-subnet-id $AKS_SUBNET_ID \
   --enable-oidc-issuer \
   --enable-workload-identity \
   --generate-ssh-keys \
-  --location $AZURE_REGION
+  --location $AZURE_REGION \
+  --service-cidr 172.16.0.0/16 \
+  --dns-service-ip 172.16.0.10
 ```
+
+**Note:** We use `Standard_D2s_v3` (2 vCPU, 8 GB RAM) by default because most new Azure subscriptions have a 10 vCPU regional quota. 3 x D2s_v3 = 6 cores fits comfortably. Use `Standard_D4s_v3` (4 vCPU) if you have quota for 12+ cores.
+
+**Note:** The `--service-cidr 172.16.0.0/16` and `--dns-service-ip 172.16.0.10` flags are required because the default AKS service CIDR (10.0.0.0/16) overlaps with our VNet address space (10.0.0.0/16). Using 172.16.0.0/16 avoids the conflict.
 
 This takes approximately 5-10 minutes.
 
@@ -237,6 +269,8 @@ Must return `true`.
 ### Step 4: Create Azure Database for PostgreSQL Flexible Server
 
 This PostgreSQL instance is used **only for the Airflow metadata database**. The merge engine uses Azure SQL Database (Step 5).
+
+**Note:** If this fails with "location is restricted for provisioning of flexible servers", your chosen region is blocking new PostgreSQL Flex Server creation. You must tear down ALL resources and start over in a different region (e.g., westus2). PostgreSQL Flex Server with VNet integration requires the server and VNet to be in the same region -- there is no cross-region workaround.
 
 ```bash
 az postgres flexible-server create \
@@ -283,6 +317,8 @@ State must be `Ready`.
 ### Step 5: Create Azure SQL Database
 
 This Azure SQL Database is used as the **merge engine** (SQL Server). DataSurface's merge jobs connect here to perform SCD2 operations.
+
+**Note:** Some Azure regions periodically stop accepting new SQL Database server provisioning. If eastus fails with `RegionDoesNotAllowProvisioning`, try eastus2 or another nearby region. When using a different region than the VNet, you cannot use VNet rules for firewall -- instead use the "Allow Azure services" firewall rule (`0.0.0.0` to `0.0.0.0`) or create a cross-region private endpoint.
 
 ```bash
 SQL_SERVER_NAME="${RESOURCE_GROUP}-sqlserver"
@@ -1659,6 +1695,68 @@ If the secret or imagePullSecrets binding is missing, re-run Step 18.
 
 ---
 
+### Region Provisioning Restrictions
+
+**Symptoms:** `RegionDoesNotAllowProvisioning` for Azure SQL Database, or "location is restricted for provisioning of flexible servers" for PostgreSQL Flexible Server.
+
+**Root cause:** Azure periodically restricts new database provisioning in high-demand regions (especially `eastus`). Both PostgreSQL Flex Server and Azure SQL Database can be blocked simultaneously. This is common on new/demo subscriptions and is not something you can fix -- you must change regions.
+
+**Why you can't work around it:**
+- **PostgreSQL Flexible Server with VNet integration** requires the server and VNet to be in the **exact same region**. Cross-region VNet integration is not supported.
+- **Azure SQL VNet rules** also require the SQL server and VNet to be in the same region. Cross-region VNet firewall rules fail with `VirtualNetworkRuleBadRequest`.
+- While you *can* create databases in a different region and use public access + firewall rules, this defeats the security benefits and adds latency.
+
+**Fix:** Tear down all resources and recreate everything in a different region:
+
+```bash
+# Delete the resource group (removes all resources)
+az group delete --name $RESOURCE_GROUP --yes --no-wait
+
+# Wait for deletion
+while az group exists --name $RESOURCE_GROUP 2>/dev/null | grep -q true; do sleep 30; done
+
+# Purge soft-deleted Key Vault
+az keyvault purge --name $KEY_VAULT_NAME 2>/dev/null || true
+
+# Change region and restart from Step 1
+export AZURE_REGION="westus2"  # or centralus, westeurope, etc.
+```
+
+**Recommended fallback regions:** `westus2`, `centralus`, `westeurope`, `northeurope`
+
+---
+
+### vCPU Quota Exceeded
+
+**Symptoms:** `QuotaExceeded` error during AKS cluster creation mentioning "Total Regional Cores quota".
+
+**Root cause:** New Azure subscriptions typically have a 10 vCPU regional core limit. `Standard_D4s_v3` (4 vCPU) x 3 nodes = 12 cores, which exceeds the default 10-core quota.
+
+**Fix options:**
+1. **Use smaller VMs** (recommended): `Standard_D2s_v3` (2 vCPU) x 3 = 6 cores. This is the default in this skill.
+2. **Use fewer nodes**: 2 x `Standard_D4s_v3` = 8 cores.
+3. **Request quota increase**: Azure Portal > Subscriptions > Usage + quotas > Request increase.
+
+**Note:** If AKS creation fails partway through, it may leave a partially-created cluster in `Failed` state. Delete it before retrying:
+
+```bash
+az aks delete --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --yes --no-wait
+# Wait for deletion (check periodically)
+while az aks show --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME 2>/dev/null; do sleep 15; done
+```
+
+---
+
+### Service CIDR Overlap
+
+**Symptoms:** AKS creation fails with `ServiceCidrOverlapExistingSubnetsCidr`.
+
+**Root cause:** The default AKS service CIDR (`10.0.0.0/16`) overlaps with the VNet address space (`10.0.0.0/16`).
+
+**Fix:** Add `--service-cidr 172.16.0.0/16 --dns-service-ip 172.16.0.10` to the `az aks create` command (already included in this skill's Step 3).
+
+---
+
 ## Key Differences: Local vs Azure
 
 | Aspect | Local (Docker Desktop) | Azure (AKS) |
@@ -1672,15 +1770,15 @@ If the secret or imagePullSecrets binding is missing, re-run Step 18.
 | Airflow image | apache/airflow:3.1.7 | Custom with pymssql + azure-identity + azure-keyvault-secrets |
 | Git cache | ReadWriteOnce | ReadWriteMany |
 | Network | localhost | VNet + private endpoints + private DNS zones |
-| Node type | Docker Desktop | Standard_D4s_v3 (4 vCPU, 16 GB RAM) |
-| Cost | Free | ~$460/month (AKS + VMs + PostgreSQL Flex + Azure SQL + storage) |
+| Node type | Docker Desktop | Standard_D2s_v3 (2 vCPU, 8 GB RAM) |
+| Cost | Free | ~$233-310/month (AKS + VMs + PostgreSQL Flex + Azure SQL + storage) |
 
 ## Cost Breakdown (Approximate)
 
 | Resource | SKU | Monthly Cost |
 |----------|-----|-------------|
 | AKS cluster | Free tier (control plane) | $0 |
-| 3x Standard_D4s_v3 nodes | 4 vCPU, 16 GB RAM each | ~$300 |
+| 3x Standard_D2s_v3 nodes | 2 vCPU, 8 GB RAM each | ~$150 |
 | PostgreSQL Flexible Server | Standard_B1ms (Burstable) | ~$25 |
 | Azure SQL Database | S1 (20 DTUs) | ~$30 |
 | Azure Files NFS | Premium, ~50 GB | ~$20 |
@@ -1688,11 +1786,10 @@ If the secret or imagePullSecrets binding is missing, re-run Step 18.
 | Private DNS zones | 2 zones | ~$2 |
 | Managed Identity | Free | $0 |
 | Bandwidth | Minimal for setup | ~$5 |
-| **Total** | | **~$383-460** |
+| **Total** | | **~$233-310** |
 
 **Cost savings tips:**
-- Use `Standard_D2s_v3` nodes (2 vCPU) if workload is light -- saves ~$150/month
-- Use `Standard_B2s` Burstable VMs for dev/test -- saves ~$200/month
+- Use `Standard_B2s` Burstable VMs for dev/test -- saves ~$100/month
 - Scale down to 1-2 nodes when not actively testing
 - Stop the AKS cluster when not in use: `az aks stop --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME`
 - Resume: `az aks start --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME`
