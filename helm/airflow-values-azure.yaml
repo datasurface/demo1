@@ -1,0 +1,118 @@
+# Airflow Helm Values for Azure AKS
+# Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-azure.yaml
+# PLACEHOLDER values are replaced by the setup-walkthrough-azure skill during deployment.
+
+executor: CeleryExecutor
+
+# Custom Airflow image with pymssql + Azure Key Vault SDK
+# Required because merge DB is Azure SQL (SQL Server) and DAGs read from Azure Key Vault
+images:
+  airflow:
+    repository: PLACEHOLDER_AIRFLOW_IMAGE_REPO
+    tag: "PLACEHOLDER_AIRFLOW_IMAGE_TAG"
+
+# External Azure Database for PostgreSQL Flexible Server
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: PLACEHOLDER_PG_ADMIN_USER
+    pass: PLACEHOLDER_PG_ADMIN_PASSWORD
+    protocol: postgresql
+    host: PLACEHOLDER_PG_FQDN
+    port: 5432
+    db: airflow_db
+    sslmode: require
+
+# Redis for Celery broker
+redis:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: azurefile-csi-nfs
+
+# Scheduler
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# Workers
+workers:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClassName: azurefile-csi-nfs
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+# API server
+apiServer:
+  service:
+    type: ClusterIP
+
+# DAG processor
+dagProcessor:
+  enabled: true
+
+# Triggerer
+triggerer:
+  enabled: true
+
+# GitSync for DAGs
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: true
+    repo: https://github.com/PLACEHOLDER_AIRFLOW_REPO.git
+    branch: main
+    subPath: dags
+    wait: 60
+    credentialsSecret: git-dags
+
+# Logs
+logs:
+  persistence:
+    enabled: true
+    storageClassName: azurefile-csi-nfs
+    size: 5Gi
+
+config:
+  logging:
+    delete_local_logs: "False"
+  scheduler:
+    dag_dir_list_interval: "60"
+
+# Service account with Workload Identity
+serviceAccount:
+  create: true
+  name: airflow-worker
+  annotations:
+    azure.workload.identity/client-id: PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID
+  labels:
+    azure.workload.identity/use: "true"
+
+# Azure Key Vault URL for DAG secret resolution
+# The infrastructure DAG's AzureKeyVaultSecretManager reads this at parse time
+env:
+  - name: AZURE_KEY_VAULT_URL
+    value: "PLACEHOLDER_KEY_VAULT_URL"
+
+# Web UI credentials
+webserver:
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin
