@@ -1403,6 +1403,45 @@ Open <http://localhost:8080> in your browser:
 
 ---
 
+### Step 29: Verify DAG Runs Are Succeeding
+
+Wait 5-10 minutes after deployment, then verify all DAGs are running successfully on schedule. The infrastructure DAG runs every 5 minutes, so you should see several completed runs.
+
+```bash
+# Check recent runs for each DAG
+for dag in demo-psp_infrastructure scd2_factory_dag scd2_datatransformer_factory Demo_PSP_K8sMergeDB_reconcile Demo_PSP_default_K8sMergeDB_cqrs; do
+  echo "=== $dag ==="
+  kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
+    airflow dags list-runs "$dag" -o table 2>&1 | grep -E "success|failed|running|dag_id" | head -6
+  echo
+done
+```
+
+Check task-level status for the most recent infrastructure run:
+
+```bash
+LATEST_RUN=$(kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
+  airflow dags list-runs demo-psp_infrastructure -o plain 2>&1 | grep scheduled | head -1 | awk '{print $2}')
+
+kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
+  airflow tasks states-for-dag-run demo-psp_infrastructure "$LATEST_RUN" -o table 2>&1 | \
+  grep -v "DeprecationWarning\|RemovedInAirflow\|permissions.py\|alembic\|info.*setup plugin"
+```
+
+Check worker logs for any errors:
+
+```bash
+kubectl logs -n $NAMESPACE -l component=worker -c worker --tail=50 2>&1 | grep -E "ERROR|Exception|Traceback"
+```
+
+**Checkpoint:**
+- All 5 DAGs show recent `success` runs (a few early `failed` runs during setup are normal)
+- All tasks within `demo-psp_infrastructure` show `success` state
+- No ERROR or Exception entries in worker logs
+- Expected task durations: `infrastructure_merge_task` ~15-20s, `create_factory_and_cqrs_dags` ~3-4s, `dc_reconcile_job` ~20-27s
+
+---
+
 ## Troubleshooting
 
 ### Password Special Characters Cause Authentication Failures
