@@ -703,45 +703,26 @@ Should show `Key Vault Secrets User` role.
 
 ## Phase 3: Model Preparation
 
-### Step 11: Build and Push Custom Airflow Image
+### Step 11: Verify Custom Airflow Image Is Available
 
-The custom image includes `pymssql` and `pyodbc` for SQL Server connectivity (Azure SQL merge DB), plus `azure-identity` and `azure-keyvault-secrets` for Workload Identity and Key Vault access at DAG parse time.
+The Azure deployment requires a custom Airflow image that includes `pymssql` and `pyodbc` for SQL Server connectivity (Azure SQL merge DB), plus `azure-identity` and `azure-keyvault-secrets` for Workload Identity and Key Vault access at DAG parse time.
 
-```bash
-cd /path/to/datasurface
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f src/datasurface/platforms/yellow/docker/Docker.airflow3x_with_drivers \
-  -t <your-registry>/airflow:3.1.7-azure \
-  --push .
+This image is **pre-built and hosted on the GitLab registry** alongside the other DataSurface images:
+
+```
+registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.7-azure
 ```
 
-Replace `<your-registry>` with your container registry (e.g., GitLab, ACR, or Docker Hub).
+It is pulled using the same `datasurface-registry` imagePullSecret created in Step 18 -- no additional registry setup is needed.
 
-**Alternative: Use Azure Container Registry (ACR):**
-
-```bash
-# Create ACR (if not already existing)
-ACR_NAME=$(echo "${RESOURCE_GROUP}acr" | tr -d '-')  # Must be globally unique, alphanumeric only (no hyphens!)
-az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic
-
-# Attach ACR to AKS (enables pull without imagePullSecrets)
-az aks update --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --attach-acr $ACR_NAME
-
-# Login and push
-az acr login --name $ACR_NAME
-docker buildx build --platform linux/amd64 \
-  -f src/datasurface/platforms/yellow/docker/Docker.airflow3x_with_drivers \
-  -t ${ACR_NAME}.azurecr.io/airflow:3.1.7-azure \
-  --push .
-```
-
-Verify the image contains required Azure dependencies:
+Verify you can pull the image:
 
 ```bash
-docker run --rm <your-registry>/airflow:3.1.7-azure pip list | grep -E "(pymssql|azure-identity|azure-keyvault)"
+docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
+docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.7-azure
 ```
 
-**Checkpoint:** Image is pushed and contains:
+**Checkpoint:** Image pulls successfully and contains:
 - `pymssql`
 - `azure-identity`
 - `azure-keyvault-secrets`
@@ -821,12 +802,8 @@ sed -i.bak "s|PLACEHOLDER_PG_ADMIN_PASSWORD|$PG_ADMIN_PASSWORD|g" /tmp/airflow-v
 sed -i.bak "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" /tmp/airflow-values-azure.yaml
 sed -i.bak "s|PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID|$IDENTITY_CLIENT_ID|g" /tmp/airflow-values-azure.yaml
 sed -i.bak "s|PLACEHOLDER_KEY_VAULT_URL|https://${KEY_VAULT_NAME}.vault.azure.net|g" /tmp/airflow-values-azure.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_IMAGE_REPO|<your-registry>/airflow|g" /tmp/airflow-values-azure.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_IMAGE_TAG|3.1.7-azure|g" /tmp/airflow-values-azure.yaml
 rm -f /tmp/airflow-values-azure.yaml.bak
 ```
-
-**Note:** Replace `<your-registry>/airflow` with your actual container registry path (e.g., `${ACR_NAME}.azurecr.io/airflow` or your GitLab registry).
 
 **Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
 

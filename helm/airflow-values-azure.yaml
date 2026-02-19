@@ -13,10 +13,11 @@ executor: CeleryExecutor
 
 # Custom Airflow image with pymssql + Azure Key Vault SDK
 # Required because merge DB is Azure SQL (SQL Server) and DAGs read from Azure Key Vault
+# Pre-built and hosted on GitLab - pulled with the same datasurface-registry secret
 images:
   airflow:
-    repository: PLACEHOLDER_AIRFLOW_IMAGE_REPO
-    tag: "PLACEHOLDER_AIRFLOW_IMAGE_TAG"
+    repository: registry.gitlab.com/datasurface-inc/datasurface/airflow
+    tag: "3.1.7-azure"
 
 # External Azure Database for PostgreSQL Flexible Server
 postgresql:
