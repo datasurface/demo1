@@ -2,6 +2,13 @@
 # Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-azure.yaml
 # PLACEHOLDER values are replaced by the setup-walkthrough-azure skill during deployment.
 
+# CRITICAL: Top-level labels block - applies to ALL pods via the Helm chart.
+# The Workload Identity mutating webhook matches on pod labels (not SA labels).
+# Without this, AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_FEDERATED_TOKEN_FILE
+# will NOT be injected into any pods, even with correct SA annotations.
+labels:
+  azure.workload.identity/use: "true"
+
 executor: CeleryExecutor
 
 # Custom Airflow image with pymssql + Azure Key Vault SDK
@@ -110,9 +117,14 @@ env:
   - name: AZURE_KEY_VAULT_URL
     value: "PLACEHOLDER_KEY_VAULT_URL"
 
-# Web UI credentials
+# Web UI credentials - ALL fields required or the create-user hook job fails.
+# The 'role' field is particularly important - omitting it causes an empty role error.
 webserver:
   defaultUser:
     enabled: true
+    role: Admin
     username: admin
+    firstName: Admin
+    lastName: User
+    email: admin@example.com
     password: admin

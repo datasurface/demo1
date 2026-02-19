@@ -34,9 +34,9 @@ RESOURCE_GROUP           # Resource group name (e.g., ds-demo-rg)
 CLUSTER_NAME             # AKS cluster name (e.g., ds-demo-aks)
 VNET_NAME                # VNet name (e.g., ds-vnet)
 PG_ADMIN_USER            # PostgreSQL admin username (NOT 'admin' - reserved by Azure)
-PG_ADMIN_PASSWORD        # PostgreSQL admin password (min 8 chars, uppercase + lowercase + number)
+PG_ADMIN_PASSWORD        # PostgreSQL admin password (see password rules below)
 SQL_ADMIN_USER           # Azure SQL admin username
-SQL_ADMIN_PASSWORD       # Azure SQL admin password (min 8 chars, complexity required)
+SQL_ADMIN_PASSWORD       # Azure SQL admin password (see password rules below)
 GITHUB_USERNAME          # GitHub username
 GITHUB_TOKEN             # GitHub Personal Access Token (repo access)
 GITLAB_CUSTOMER_USER     # GitLab deploy token username
@@ -45,9 +45,11 @@ DATASURFACE_VERSION      # DataSurface version (default: 1.1.0)
 MODEL_REPO               # Target model repo (e.g., yourorg/demo1)
 AIRFLOW_REPO             # Target DAG repo (e.g., yourorg/demo1_airflow)
 NAMESPACE                # K8s namespace (default: demo1-azure)
-KEY_VAULT_NAME           # Globally unique Key Vault name (e.g., ds-demo-kv-<random>)
+KEY_VAULT_NAME           # Globally unique Key Vault name (3-24 chars, alphanumeric + hyphens, no consecutive hyphens, e.g., dsdemokv<random>)
 MANAGED_IDENTITY_NAME    # Managed identity name (e.g., ds-airflow-identity)
 ```
+
+**CRITICAL: Password Character Restrictions.** Database passwords must **NOT** contain `!`, `\`, `$`, backticks, or other shell metacharacters. The macOS default shell (zsh) escapes `!` even inside single quotes when used with `kubectl create secret --from-literal`, silently corrupting passwords (e.g., `DsDemo2024pg!` becomes `DsDemo2024pg\!` in the stored secret). This causes persistent "password authentication failed" errors that are extremely difficult to diagnose because the password *looks* correct in the `az` CLI but doesn't match what's stored in the K8s secret. **Use only alphanumeric characters and simple symbols like `-` or `_` in all passwords.** Minimum 8 characters with uppercase + lowercase + number to satisfy Azure complexity requirements.
 
 Verify Azure CLI is configured:
 
@@ -719,7 +721,7 @@ Replace `<your-registry>` with your container registry (e.g., GitLab, ACR, or Do
 
 ```bash
 # Create ACR (if not already existing)
-ACR_NAME="${RESOURCE_GROUP}acr"  # Must be globally unique, alphanumeric only
+ACR_NAME=$(echo "${RESOURCE_GROUP}acr" | tr -d '-')  # Must be globally unique, alphanumeric only (no hyphens!)
 az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic
 
 # Attach ACR to AKS (enables pull without imagePullSecrets)
@@ -964,10 +966,22 @@ kubectl create secret docker-registry datasurface-registry \
   --docker-password="$GITLAB_CUSTOMER_TOKEN" \
   -n $NAMESPACE
 
-# Attach image pull secret to default service account
+# Attach image pull secret to default and airflow-worker service accounts.
+# The airflow-worker SA is used by generated job pods (ring1-init, model-merge, reconcile-views)
+# which need to pull DataSurface images from the GitLab registry.
 kubectl patch serviceaccount default -n $NAMESPACE \
   -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
 ```
+
+**IMPORTANT: Creating K8s Secrets with Special Characters.** If you must create K8s secrets containing passwords with special characters, do NOT use `kubectl create secret --from-literal` in zsh. Instead, write the value to a file and use `--from-file`:
+
+```bash
+printf '%s' "$PASSWORD_WITH_SPECIAL_CHARS" > /tmp/password.txt
+kubectl create secret generic my-secret --from-file=PASSWORD=/tmp/password.txt -n $NAMESPACE
+rm /tmp/password.txt
+```
+
+This avoids zsh shell escaping issues. Better yet, follow the password guidance in the Pre-Flight section and avoid special characters entirely.
 
 Create git-dags secret for Helm git-sync:
 
@@ -1021,6 +1035,38 @@ Replace `<path-to-model>` with the actual path to your model repository.
 
 ### Step 20: Install Airflow via Helm
 
+**IMPORTANT: Verify Helm values BEFORE installing.** The Helm values file (`/tmp/airflow-values-azure.yaml`) must include these sections or the deployment will fail silently or with confusing errors:
+
+**1. Pod-Level Workload Identity Labels (CRITICAL).** The Workload Identity mutating webhook uses a Kubernetes `objectSelector` that matches on **pod** labels, NOT service account labels. Without a top-level `labels:` block, the webhook will NOT inject `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_FEDERATED_TOKEN_FILE` environment variables into any pods -- even if the service account has the correct annotation and label. The Helm values file MUST include at the root level:
+
+```yaml
+# Top-level labels block - applied to ALL pods by the Helm chart
+labels:
+  azure.workload.identity/use: "true"
+```
+
+Without this, Workload Identity will appear to be configured correctly (SA has the right annotation and label) but pods will silently lack the Azure credentials.
+
+**2. Complete webserver.defaultUser.** The `webserver.defaultUser` section must include ALL required fields or the `create-user` hook job will fail:
+
+```yaml
+webserver:
+  defaultUser:
+    enabled: true
+    role: Admin
+    username: admin
+    firstName: Admin
+    lastName: User
+    email: admin@example.com
+    password: admin
+```
+
+The `role` field is particularly important -- omitting it causes the hook to fail with an empty role error.
+
+**3. Environment variables for Azure services.** All Airflow pods need `AZURE_KEY_VAULT_URL` set via the `env:` section in the values file, since the infrastructure DAG uses `AzureKeyVaultSecretManager` at parse time.
+
+Now install:
+
 ```bash
 helm repo add apache-airflow https://airflow.apache.org
 helm repo update
@@ -1047,6 +1093,8 @@ All Airflow pods should reach `Running` state:
 - airflow-statsd
 
 **Note:** If pods are stuck in `Init:Error`, the DAG repository was not initialized before this step (Step 19).
+
+**Note:** If the Helm install times out but pods are still progressing (creating, pulling images), the release may be left in `pending-install` state. See the "Helm Release Stuck in Pending State" troubleshooting section.
 
 ---
 
@@ -1157,63 +1205,61 @@ Should show:
 
 ---
 
-### Step 23: Deploy Bootstrap and Run Jobs
+### Step 23: Create Kubernetes Secrets for Job Pods
+
+**CRITICAL:** The generated job YAMLs (ring1-init, model-merge, reconcile-views) reference Kubernetes secrets via `secretKeyRef`. These are **separate** from the Key Vault secrets created in Step 16 and from the registry/git-dags secrets created in Step 18. You must create these K8s secrets before running the jobs.
+
+The jobs expect two secrets:
+- `git` - with key `TOKEN` (GitHub PAT for model repo access)
+- `sqlserver-demo-merge` - with keys `USER` and `PASSWORD` (Azure SQL credentials)
+
+```bash
+# Git credentials for model repo access at runtime
+kubectl create secret generic git \
+  --from-literal=TOKEN=$GITHUB_TOKEN \
+  -n $NAMESPACE
+
+# Azure SQL merge database credentials
+kubectl create secret generic sqlserver-demo-merge \
+  --from-literal=USER=$SQL_ADMIN_USER \
+  --from-literal=PASSWORD="$SQL_ADMIN_PASSWORD" \
+  -n $NAMESPACE
+```
+
+**Checkpoint:**
+
+```bash
+kubectl get secrets git sqlserver-demo-merge -n $NAMESPACE
+```
+
+Both secrets should exist. Verify the keys are correct:
+
+```bash
+kubectl get secret git -n $NAMESPACE -o jsonpath='{.data}' | python3 -c "import sys,json,base64; d=json.load(sys.stdin); print('TOKEN:', 'present' if 'TOKEN' in d else 'MISSING')"
+kubectl get secret sqlserver-demo-merge -n $NAMESPACE -o jsonpath='{.data}' | python3 -c "import sys,json,base64; d=json.load(sys.stdin); print('USER:', 'present' if 'USER' in d else 'MISSING', 'PASSWORD:', 'present' if 'PASSWORD' in d else 'MISSING')"
+```
+
+---
+
+### Step 24: Deploy Bootstrap and Run Jobs
 
 **IMPORTANT:** Jobs must run sequentially. The ring1-init job creates database tables that model-merge depends on. Running them simultaneously causes a race condition where model-merge fails trying to access non-existent tables.
 
-#### 23a. Fix Generated YAML Before Applying
+#### 24a. Validate Generated YAML
 
-The bootstrap generator produces YAMLs with values that may not match the actual AKS environment. Apply these fixes before deploying. **Use the Edit tool (not sed) for YAML modifications** to avoid indentation errors that break kubectl parsing.
+The bootstrap generator (v1.1.0+) produces correct Azure YAML out of the box, including the correct `storageClassName`, `serviceAccountName`, `imagePullSecrets`, environment variables, and credential handling. No manual edits should be needed.
 
-**Fix 1: storageClassName** in `kubernetes-bootstrap.yaml`:
-- Change `storageClassName: gp3` (or whatever default) to `storageClassName: azurefile-csi-nfs`
-
-**Fix 2: serviceAccountName** in all `*job*.yaml` files:
-- Change `serviceAccountName: airflow-service-account` to `serviceAccountName: airflow-worker`
-
-**Fix 3: Add missing env vars** to all `*job*.yaml` files. Add these env vars to the `env:` block in each job, **matching the existing indentation exactly**:
-
-```yaml
-        - name: RTE_TARGET
-          value: "azure"
-        - name: MERGE_HOST
-          value: "<SQL_SERVER_FQDN>"
-        - name: AZURE_KEY_VAULT_URL
-          value: "https://<KEY_VAULT_NAME>.vault.azure.net"
-        - name: NAMESPACE
-          value: "<NAMESPACE>"
-```
-
-**IMPORTANT: Do NOT use `sed` to inject env vars into YAML files.** The generated job files have inconsistent indentation (some use 8-space, some 10-space base indent). Using `sed` to append after a pattern produces wrong indentation that breaks YAML parsing. Use the Edit tool to add env vars matching each file's existing indentation.
-
-**Fix 4: Broken bash line continuations** in generated job scripts. The generator sometimes inserts blank lines between `--flag \` continuation lines (e.g., between `--rte-name demo \` and `--use-git-cache \`). These blank lines break the bash `\` continuation, causing `--use-git-cache: command not found` errors. Remove any blank lines within multi-line bash commands.
-
-**Fix 5: Hyphenated credential env var names (REQUIRED).** The generated job bash scripts export credentials with underscored names (e.g., `export sqlserver_demo_merge_USER=...`) because bash cannot have hyphens in variable names. However, the DataSurface platform Python code expects hyphenated names (e.g., `sqlserver-demo-merge_USER`). **You must wrap the `python -m datasurface.cmd.platform` command with the `env` command** to pass hyphenated names:
-
-Change the python command in each job script from:
-```bash
-python -m datasurface.cmd.platform <command> \
-  --arg1 val1 ...
-```
-
-To:
-```bash
-env "sqlserver-demo-merge_USER=$sqlserver_demo_merge_USER" \
-    "sqlserver-demo-merge_PASSWORD=$sqlserver_demo_merge_PASSWORD" \
-    "git_TOKEN=$git_TOKEN" \
-python -m datasurface.cmd.platform <command> \
-  --arg1 val1 ...
-```
-
-**Checkpoint:** After all fixes, validate each job YAML parses correctly:
+Validate all job YAMLs parse correctly before applying:
 
 ```bash
-for f in generated_output/Demo_PSP/*job*.yaml; do
+for f in generated_output/Demo_PSP/*job*.yaml generated_output/Demo_PSP/kubernetes-bootstrap.yaml; do
   kubectl apply --dry-run=client -f "$f" && echo "$f: OK" || echo "$f: FAILED"
 done
 ```
 
-#### 23b. Deploy Bootstrap and Run Jobs
+If any YAML fails validation, inspect the file and fix the specific issue.
+
+#### 24b. Deploy Bootstrap and Run Jobs
 
 ```bash
 # Apply Kubernetes bootstrap (creates PVCs, ConfigMaps, NetworkPolicy, MCP server)
@@ -1266,7 +1312,7 @@ kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
 
 ---
 
-### Step 24: Verify Jobs Complete
+### Step 25: Verify Jobs Complete
 
 ```bash
 kubectl get jobs -n $NAMESPACE -o wide
@@ -1287,8 +1333,8 @@ kubectl logs -n $NAMESPACE -l job-name=demo-psp-model-merge-job --tail=100
 **Common failure causes:**
 - **Azure SQL connectivity**: Verify private endpoint DNS resolution, or check firewall rules
 - **Key Vault access denied**: Workload Identity not injected (check Step 21)
-- **Missing env vars**: Check that `RTE_TARGET`, `AZURE_KEY_VAULT_URL`, `NAMESPACE` are set (check Step 23a Fix 3)
-- **Credential name mismatch**: Check that hyphenated env vars are passed via `env` command (check Step 23a Fix 5)
+- **Missing K8s secrets**: Verify `git` and `sqlserver-demo-merge` secrets exist (check Step 23)
+- **ImagePullBackOff**: Verify `datasurface-registry` secret exists and `airflow-worker` SA has `imagePullSecrets`
 
 **Checkpoint:** Both jobs show `1/1 COMPLETIONS` and `0` failures.
 
@@ -1296,7 +1342,7 @@ kubectl logs -n $NAMESPACE -l job-name=demo-psp-model-merge-job --tail=100
 
 ## Phase 6: Verify & Access
 
-### Step 25: Create Airflow Admin User
+### Step 26: Create Airflow Admin User
 
 ```bash
 kubectl exec deployment/airflow-scheduler -n $NAMESPACE -- \
@@ -1313,7 +1359,7 @@ kubectl exec deployment/airflow-scheduler -n $NAMESPACE -- \
 
 ---
 
-### Step 26: Verify DAGs Registered
+### Step 27: Verify DAGs Registered
 
 Wait 60-90 seconds for git-sync to pull the DAG files, then verify:
 
@@ -1343,7 +1389,7 @@ kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- 
 
 ---
 
-### Step 27: Port-Forward and Access UI
+### Step 28: Port-Forward and Access UI
 
 ```bash
 kubectl port-forward svc/airflow-api-server 8080:8080 -n $NAMESPACE
@@ -1358,6 +1404,77 @@ Open <http://localhost:8080> in your browser:
 ---
 
 ## Troubleshooting
+
+### Password Special Characters Cause Authentication Failures
+
+**Symptoms:** "password authentication failed for user" (PostgreSQL) or "Login failed for user" error 18456 (SQL Server), even though the password appears correct in `az` CLI output.
+
+**Root cause:** The macOS default shell (zsh) performs history expansion on `!` even inside single quotes when the string is passed as a command argument. This means `kubectl create secret --from-literal=password='DsDemo2024pg!'` silently stores `DsDemo2024pg\!` (with backslash) in the Kubernetes secret. The Azure database has the correct password (`DsDemo2024pg!`), but the K8s secret has the corrupted version, causing authentication failures.
+
+**Diagnosis:**
+
+```bash
+# Check what's actually stored in the K8s secret
+kubectl get secret <secret-name> -n $NAMESPACE -o jsonpath='{.data.PASSWORD}' | base64 -d
+```
+
+If you see a backslash before `!`, the password was corrupted by shell escaping.
+
+**Fix:** Reset the database password to one without special characters, then recreate the K8s secret:
+
+```bash
+# Reset PostgreSQL password
+az postgres flexible-server update \
+  --resource-group $RESOURCE_GROUP \
+  --name ${RESOURCE_GROUP}-pgflex \
+  --admin-password "NewPasswordNoSpecialChars"
+
+# Reset SQL Server password
+az sql server update \
+  --resource-group $RESOURCE_GROUP \
+  --name $SQL_SERVER_NAME \
+  --admin-password "NewPasswordNoSpecialChars"
+
+# Also update the Key Vault secret if using Azure Key Vault
+az keyvault secret set --vault-name $KEY_VAULT_NAME \
+  --name "datasurface--${NAMESPACE}--Demo--sqlserver-demo-merge--credentials" \
+  --value "{\"USER\":\"${SQL_ADMIN_USER}\",\"PASSWORD\":\"NewPasswordNoSpecialChars\"}"
+```
+
+**Prevention:** Use only alphanumeric characters and simple symbols (`-`, `_`) in all passwords. This is documented in the Pre-Flight Checklist.
+
+---
+
+### Helm Release Stuck in Pending State
+
+**Symptoms:** `helm install` or `helm upgrade` fails or times out, leaving the release in `pending-install` or `pending-upgrade` state. Subsequent `helm install` fails with "cannot re-use a name that is still in use", and `helm upgrade` fails with "another operation (install/upgrade/rollback) is in progress".
+
+**Diagnosis:**
+
+```bash
+helm list -n $NAMESPACE -a
+```
+
+Shows release status as `pending-install` or `pending-upgrade`.
+
+**Fix:** Uninstall with `--no-hooks` (hooks may be the cause of the failure), then reinstall:
+
+```bash
+helm uninstall airflow -n $NAMESPACE --no-hooks
+# Wait for resources to be cleaned up
+kubectl get pods -n $NAMESPACE -w  # Watch until all airflow pods are gone
+# Then reinstall
+helm install airflow apache-airflow/airflow \
+  -f /tmp/airflow-values-azure.yaml \
+  -n $NAMESPACE \
+  --timeout 10m
+```
+
+**Note:** `helm uninstall` will delete all Airflow pods, PVCs (if not using `--keep-history`), and services. This is safe because all persistent data is in external databases (PostgreSQL, Azure SQL) and Azure Files NFS volumes. The `--no-hooks` flag is important because hook jobs (like `create-user`) may be what caused the failure in the first place.
+
+**Prevention:** Ensure the `webserver.defaultUser` section in Helm values includes all required fields (especially `role: Admin`) before the first install. Missing fields cause the `create-user` hook job to fail, which leaves the release in a pending state.
+
+---
 
 ### PostgreSQL Flexible Server Connectivity
 
@@ -1463,7 +1580,17 @@ kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AZURE
 
 **Common causes and fixes:**
 
-1. **Missing label on service account:** Workload Identity requires BOTH the annotation AND the label:
+1. **Missing pod-level Workload Identity label (MOST COMMON):** The Workload Identity mutating webhook uses a Kubernetes `objectSelector` that matches on **pod** labels, not just service account labels. Even if the SA has the correct annotation and label, the webhook won't inject credentials unless the **pod itself** has `azure.workload.identity/use: "true"`. The Helm values file must include a top-level `labels:` block:
+   ```yaml
+   labels:
+     azure.workload.identity/use: "true"
+   ```
+   After adding this, run `helm upgrade` and restart pods. Verify with:
+   ```bash
+   kubectl get pod airflow-worker-0 -n $NAMESPACE -o jsonpath='{.metadata.labels}' | python3 -m json.tool | grep workload
+   ```
+
+2. **Missing label on service account:** Workload Identity also requires BOTH the annotation AND the label on the SA:
    ```bash
    kubectl get sa airflow-worker -n $NAMESPACE -o yaml | grep -A2 "workload.identity"
    ```
@@ -1478,7 +1605,7 @@ kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AZURE
    kubectl delete pod airflow-worker-0 -n $NAMESPACE
    ```
 
-2. **Federated credential mismatch:** The subject in the federated credential must exactly match the service account name and namespace:
+3. **Federated credential mismatch:** The subject in the federated credential must exactly match the service account name and namespace:
    ```bash
    az identity federated-credential list \
      --identity-name $MANAGED_IDENTITY_NAME \
@@ -1487,7 +1614,7 @@ kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AZURE
    ```
    Each subject must be `system:serviceaccount:${NAMESPACE}:<sa-name>`.
 
-3. **OIDC issuer URL mismatch:** The issuer in federated credentials must match the AKS cluster's OIDC issuer:
+4. **OIDC issuer URL mismatch:** The issuer in federated credentials must match the AKS cluster's OIDC issuer:
    ```bash
    az aks show --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME \
      --query "oidcIssuerProfile.issuerUrl" -o tsv
@@ -1502,7 +1629,7 @@ kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AZURE
    ```
    Both must be identical.
 
-4. **Pod not restarted after annotation:** Workload Identity is injected at pod creation time via a mutating webhook. If you annotated the SA after the pod was created, you must delete and recreate the pod:
+5. **Pod not restarted after annotation:** Workload Identity is injected at pod creation time via a mutating webhook. If you annotated the SA after the pod was created, you must delete and recreate the pod:
    ```bash
    kubectl delete pod -n $NAMESPACE -l component=worker
    kubectl delete pod -n $NAMESPACE -l component=dag-processor
