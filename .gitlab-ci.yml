@@ -3,19 +3,46 @@ stages:
 
 datasurface-mr-validator:
   stage: validate
-  image: registry.gitlab.com/datasurface-inc/datasurface:latest
-  before_script:
-    - mkdir -p /workspace/main /workspace/mr
-    - cd /workspace/main && git clone --depth 1 --branch main "$CI_SERVER_URL/$CI_PROJECT_PATH.git" . || true
-    - cd /workspace/mr && git clone --depth 1 --branch "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "$CI_SERVER_URL/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH.git" . || true
-  script:
-    - python -m datasurface.handler.action /workspace/main /workspace/mr
-  only:
-    - merge_requests
-  environment:
-    name: validation
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+      command: ["--tls=false"]
+  tags:
+    - docker
+    - linux
   variables:
-    BASE_REPOSITORY: $CI_PROJECT_PATH
-    HEAD_REPOSITORY: $CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    GIT_STRATEGY: none
+    GITLAB_CLONE_HOST: gitlab.local
+    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.2.2
+    BASE_REPOSITORY: http://gitlab.local/$CI_PROJECT_PATH
+    HEAD_REPOSITORY: http://gitlab.local/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
     HEAD_BRANCH: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+    GITLAB_URL: http://gitlab.local
     GITHUB_TOKEN: $CI_JOB_TOKEN
+  before_script:
+    - mkdir -p /tmp/main /tmp/mr
+    - git clone --depth 1 --branch main "http://oauth2:${GITLAB_REPO_TOKEN}@${GITLAB_CLONE_HOST}/${CI_PROJECT_PATH}.git" /tmp/main
+    - git clone --depth 1 --branch "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "http://oauth2:${GITLAB_REPO_TOKEN}@${GITLAB_CLONE_HOST}/${CI_MERGE_REQUEST_SOURCE_PROJECT_PATH}.git" /tmp/mr
+    - test -f /tmp/main/eco.py
+    - test -f /tmp/mr/eco.py
+    - echo "$GITLAB_ACCESS_TOKEN" | docker login registry.gitlab.com -u "$GITLAB_USERNAME" --password-stdin
+  script:
+    - |
+      CID=$(docker create \
+        -e GITHUB_TOKEN="$GITHUB_TOKEN" \
+        -e BASE_REPOSITORY="$BASE_REPOSITORY" \
+        -e HEAD_REPOSITORY="$HEAD_REPOSITORY" \
+        -e HEAD_BRANCH="$HEAD_BRANCH" \
+        -e GITLAB_URL="$GITLAB_URL" \
+        "$DATASURFACE_IMAGE" \
+        python -m datasurface.handler.action /workspace/main /workspace/mr --repo-type gitlab )
+      docker cp /tmp/main/. "$CID":/workspace/main
+      docker cp /tmp/mr/. "$CID":/workspace/mr
+      docker start -a "$CID"
+      RC=$?
+      docker rm -f "$CID" >/dev/null 2>&1 || true
+      exit $RC
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
