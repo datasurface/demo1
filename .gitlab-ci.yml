@@ -30,6 +30,10 @@ datasurface-mr-validator:
     - echo "$GITLAB_ACCESS_TOKEN" | docker login registry.gitlab.com -u "$GITLAB_USERNAME" --password-stdin
   script:
     - |
+      ALLOW_BREAKS=""
+      if echo "$CI_MERGE_REQUEST_LABELS" | tr ',' '\n' | grep -qx 'breaking-change-approved'; then
+        ALLOW_BREAKS="--allow-breaking-changes"
+      fi
       CID=$(docker create \
         -e GITHUB_TOKEN="$GITHUB_TOKEN" \
         -e BASE_REPOSITORY="$BASE_REPOSITORY" \
@@ -37,7 +41,7 @@ datasurface-mr-validator:
         -e HEAD_BRANCH="$HEAD_BRANCH" \
         -e GITLAB_URL="$GITLAB_URL" \
         "$DATASURFACE_IMAGE" \
-        python -m datasurface.handler.action /workspace/main /workspace/mr --repo-type gitlab )
+        python -m datasurface.handler.action /workspace/main /workspace/mr --repo-type gitlab $ALLOW_BREAKS )
       docker cp /tmp/main/. "$CID":/workspace/main
       docker cp /tmp/mr/. "$CID":/workspace/mr
       docker start -a "$CID"
