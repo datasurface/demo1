@@ -78,6 +78,16 @@ config:
   scheduler:
     dag_dir_list_interval: "60"
 
+# PgBouncer connection pooler - prevents deadlock-induced session corruption
+# See: docs/YellowOperationsGuide/410_PerformanceTuning.md
+pgbouncer:
+  enabled: true
+  metadataPoolSize: 25
+  resultBackendPoolSize: 10
+  maxClientConn: 200
+  extraIni: |
+    pool_mode = session
+
 # Web UI credentials
 webserver:
   defaultUser:

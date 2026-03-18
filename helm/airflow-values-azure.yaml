@@ -118,6 +118,16 @@ env:
   - name: AZURE_KEY_VAULT_URL
     value: "PLACEHOLDER_KEY_VAULT_URL"
 
+# PgBouncer connection pooler - prevents deadlock-induced session corruption
+# See: docs/YellowOperationsGuide/410_PerformanceTuning.md
+pgbouncer:
+  enabled: true
+  metadataPoolSize: 25
+  resultBackendPoolSize: 10
+  maxClientConn: 200
+  extraIni: |
+    pool_mode = session
+
 # Web UI credentials - ALL fields required or the create-user hook job fails.
 # The 'role' field is particularly important - omitting it causes an empty role error.
 webserver:

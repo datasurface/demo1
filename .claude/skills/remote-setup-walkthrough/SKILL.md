@@ -97,6 +97,20 @@ host    all    all    10.244.0.0/16    scram-sha-256
 sudo systemctl reload postgresql
 ```
 
+### Tune PostgreSQL for Airflow workloads
+
+The Helm values enable PgBouncer with `pool_mode = session` and a metadata pool size of 25. PostgreSQL's default `max_connections = 100` is too low once PgBouncer and other databases share the server. On the Airflow metadata PostgreSQL host:
+
+```bash
+# In /etc/postgresql/*/main/postgresql.conf, set:
+max_connections = 200          # headroom for pgbouncer pools + admin connections
+
+# Restart PostgreSQL (max_connections requires restart, not just reload)
+sudo systemctl restart postgresql
+```
+
+For additional PostgreSQL memory tuning (shared_buffers, work_mem, etc.), see the [Performance Tuning](https://github.com/datasurface/datasurface/blob/main/docs/YellowOperationsGuide/410_PerformanceTuning.md) guide.
+
 ### Verify SSH connectivity and cluster access
 
 ```bash
