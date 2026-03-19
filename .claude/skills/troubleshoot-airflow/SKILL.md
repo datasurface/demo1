@@ -342,6 +342,55 @@ Helm upgrades can cause cascading issues. Follow this checklist:
 
 ---
 
+## Executor / Queue Backpressure
+
+Symptoms: Tasks take a long time to start, DAG runs queue up, `celery_task_timeout_error` counter increases.
+
+### Diagnose
+
+Pull metrics from the statsd exporter:
+
+```bash
+curl -s http://$(kubectl get svc -n $NAMESPACE airflow-statsd -o jsonpath="{.spec.clusterIP}"):9102/metrics | \
+  grep -E "^airflow_executor|^airflow_pool_running|^airflow_pool_queued|^airflow_pool_scheduled|^airflow_celery_task_timeout"
+```
+
+| Metric | Healthy | Backpressured |
+|--------|---------|---------------|
+| `executor_open_slots` | >> 0 | Near 0 |
+| `executor_queued_tasks` | Low | Growing |
+| `pool_scheduled_slots` | 0 | > 0 (tasks waiting) |
+| `celery_task_timeout_error` | Stable | Increasing |
+
+### Fix
+
+The bottleneck is usually `parallelism` (global max concurrent tasks) and/or `worker_concurrency` (tasks per Celery worker).
+
+**Formula:** Effective capacity = `worker_concurrency` x `number of workers`
+
+This must be <= `parallelism`, and both must exceed your peak concurrent task count.
+
+```bash
+# Check current settings
+helm get values airflow -n $NAMESPACE | grep -A2 "parallelism\|worker_concurrency"
+
+# Update via helm
+helm upgrade airflow apache-airflow/airflow -n $NAMESPACE \
+  -f <(helm get values airflow -n $NAMESPACE) \
+  --set config.core.parallelism=128 \
+  --set config.celery.worker_concurrency=8
+```
+
+**Sizing guide:**
+
+| DAGs | Schedule | Recommended parallelism | worker_concurrency x workers |
+|------|----------|------------------------|------------------------------|
+| 50 | 1 min | 64 | 4 x 5 = 20 |
+| 200 | 1 min | 256 | 8 x 10 = 80 |
+| 50 | 5 min | 32 | 2 x 5 = 10 |
+
+---
+
 ## Quick Health Check
 
 Run this to get a quick overview of Airflow health:

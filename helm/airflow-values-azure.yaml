@@ -106,6 +106,10 @@ logs:
     size: 25Gi
 
 config:
+  core:
+    parallelism: "128"
+  celery:
+    worker_concurrency: "8"
   logging:
     delete_local_logs: "False"
   scheduler:
