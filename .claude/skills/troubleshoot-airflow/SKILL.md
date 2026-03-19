@@ -187,22 +187,31 @@ If it shows `pool_mode = session` (or `pool_mode` appears twice), fix the helm v
 
 ## Airflow Web UI Returns 500
 
-### Quick fix
+### Quick fix — ALWAYS restart ALL components together
+
+Restarting only api-server + pgbouncer causes JWT secret mismatch with workers/scheduler, leading to recurring 500s. Always restart everything:
 
 ```bash
-kubectl rollout restart deployment airflow-api-server airflow-pgbouncer -n $NAMESPACE
+kubectl rollout restart deployment airflow-api-server airflow-pgbouncer airflow-scheduler airflow-dag-processor -n $NAMESPACE
+kubectl rollout restart statefulset airflow-worker airflow-triggerer -n $NAMESPACE
 ```
 
-### If 500 persists after restart
+### If 500 persists after full restart
 
-Check the api-server logs:
+Check the api-server logs for the specific error:
 
 ```bash
 kubectl logs -n $NAMESPACE $(kubectl get pods -n $NAMESPACE --no-headers | \
   grep airflow-api-server | grep Running | head -1 | awk '{print $1}') \
   -c api-server --tail=20 2>&1 | \
-  grep -iE "error|traceback|500|PendingRollback"
+  grep -iE "error|traceback|500|PendingRollback|Signature"
 ```
+
+| Error in logs | Cause | Fix |
+|--------------|-------|-----|
+| `Signature verification failed` | JWT secret mismatch — some components have old secret | Restart ALL components (above) |
+| `PendingRollbackError` | Stale PgBouncer connections after DB restart | Covered by full restart above |
+| No errors in api-server | Browser caching old port or stale session | Clear browser cache, check current NodePort |
 
 ### After helm upgrade, UI port may change
 
