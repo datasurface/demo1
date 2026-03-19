@@ -32,6 +32,8 @@ redis:
 # Single scheduler for local dev
 scheduler:
   replicas: 1
+  logGroomerSidecar:
+    retentionDays: 2
 
 # Single worker for local dev
 workers:
@@ -39,6 +41,8 @@ workers:
   persistence:
     enabled: true
     storageClassName: standard
+  logGroomerSidecar:
+    retentionDays: 2
 
 # API server with NodePort for local access
 apiServer:
@@ -48,10 +52,14 @@ apiServer:
 # DAG processor
 dagProcessor:
   enabled: true
+  logGroomerSidecar:
+    retentionDays: 2
 
 # Triggerer for async sensors
 triggerer:
   enabled: true
+  logGroomerSidecar:
+    retentionDays: 2
 
 # GitSync for DAGs - pulls from GitHub repository
 dags:
@@ -70,7 +78,7 @@ logs:
   persistence:
     enabled: true
     storageClassName: hostpath
-    size: 5Gi
+    size: 25Gi
 
 config:
   logging:
@@ -78,15 +86,23 @@ config:
   scheduler:
     dag_dir_list_interval: "60"
 
-# PgBouncer connection pooler - prevents deadlock-induced session corruption
-# See: docs/YellowOperationsGuide/410_PerformanceTuning.md
+# Cleanup CronJob - purges old metadata to prevent scheduler slowdown
+# With many DAGs on frequent schedules, dag_run and task_instance tables grow rapidly
+cleanup:
+  enabled: true
+  schedule: "*/30 * * * *"
+  args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
+
+# PgBouncer connection pooler - transaction mode returns connections to the pool
+# after each transaction, preventing stale connection issues after DB restarts
 pgbouncer:
   enabled: true
   metadataPoolSize: 25
   resultBackendPoolSize: 10
   maxClientConn: 200
   extraIni: |
-    pool_mode = session
+    pool_mode = transaction
+    server_reset_query = DISCARD ALL
 
 # Web UI credentials
 webserver:

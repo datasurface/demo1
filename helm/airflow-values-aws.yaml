@@ -41,6 +41,8 @@ scheduler:
     limits:
       cpu: 1000m
       memory: 2Gi
+  logGroomerSidecar:
+    retentionDays: 2
 
 # Workers
 workers:
@@ -55,6 +57,8 @@ workers:
     limits:
       cpu: 2000m
       memory: 4Gi
+  logGroomerSidecar:
+    retentionDays: 2
 
 # API server
 apiServer:
@@ -64,10 +68,14 @@ apiServer:
 # DAG processor
 dagProcessor:
   enabled: true
+  logGroomerSidecar:
+    retentionDays: 2
 
 # Triggerer
 triggerer:
   enabled: true
+  logGroomerSidecar:
+    retentionDays: 2
 
 # GitSync for DAGs
 dags:
@@ -86,13 +94,19 @@ logs:
   persistence:
     enabled: true
     storageClassName: efs-sc
-    size: 5Gi
+    size: 25Gi
 
 config:
   logging:
     delete_local_logs: "False"
   scheduler:
     dag_dir_list_interval: "60"
+
+# Cleanup CronJob - purges old metadata to prevent scheduler slowdown
+cleanup:
+  enabled: true
+  schedule: "*/30 * * * *"
+  args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
 
 # Service account with IRSA annotation
 serviceAccount:
@@ -122,15 +136,16 @@ env:
   - name: AWS_REGION
     value: "PLACEHOLDER_AWS_REGION"
 
-# PgBouncer connection pooler - prevents deadlock-induced session corruption
-# See: docs/YellowOperationsGuide/410_PerformanceTuning.md
+# PgBouncer connection pooler - transaction mode returns connections to the pool
+# after each transaction, preventing stale connection issues after DB restarts
 pgbouncer:
   enabled: true
   metadataPoolSize: 25
   resultBackendPoolSize: 10
   maxClientConn: 200
   extraIni: |
-    pool_mode = session
+    pool_mode = transaction
+    server_reset_query = DISCARD ALL
 
 # Web UI credentials
 webserver:

@@ -100,7 +100,7 @@ SELECT count(*) FROM pg_stat_activity WHERE datname = 'merge_db';
 | | Airflow Metadata DB | Merge DB |
 |---|---|---|
 | Access pattern | Read-heavy (UI queries), frequent small updates | Write-heavy (bulk inserts/deletes per batch) |
-| Connection pooling | Through PgBouncer (session mode recommended) | Direct connections from K8s job pods |
+| Connection pooling | Through PgBouncer (transaction mode with `server_reset_query = DISCARD ALL`) | Direct connections from K8s job pods |
 | Deadlock risk | High (scheduler vs UI on `dag` table) | Low (jobs operate on separate stream tables) |
 | Autovacuum pressure | Moderate | High (staging table churn) |
 | WAL volume | Moderate | High |

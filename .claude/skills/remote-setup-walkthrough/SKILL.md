@@ -99,7 +99,7 @@ sudo systemctl reload postgresql
 
 ### Tune PostgreSQL for Airflow workloads
 
-The Helm values enable PgBouncer with `pool_mode = session` and a metadata pool size of 25. PostgreSQL's default `max_connections = 100` is too low once PgBouncer and other databases share the server. On the Airflow metadata PostgreSQL host:
+The Helm values enable PgBouncer with `pool_mode = transaction` and `server_reset_query = DISCARD ALL`. Transaction mode returns connections to the pool after each transaction, preventing stale connection issues after DB restarts. PostgreSQL's default `max_connections = 100` is too low once PgBouncer and other databases share the server. On the Airflow metadata PostgreSQL host:
 
 ```bash
 # In /etc/postgresql/*/main/postgresql.conf, set:
@@ -809,67 +809,34 @@ done
 
 ---
 
-## Post-Setup: Deploy Log Cleanup CronJob
+## Post-Setup: Verify Cleanup is Active
 
-The Airflow logs PVC will eventually fill up, causing all jobs to fail with `OSError: No space left on device`. Deploy this CronJob to prevent it:
+The Helm values include automatic cleanup that prevents the Airflow metadata DB and logs volume from growing unbounded:
 
-```bash
-$SSH_CMD 'cat <<EOF | kubectl apply -f -
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: airflow-log-cleanup
-  namespace: $NAMESPACE
-spec:
-  schedule: "0 * * * *"
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: OnFailure
-          containers:
-          - name: cleanup
-            image: busybox:latest
-            command:
-            - /bin/sh
-            - -c
-            - |
-              echo "Starting log cleanup at $(date)"
-              echo "Before cleanup:"
-              df -h /opt/airflow/logs
-              find /opt/airflow/logs -type f -mtime +2 -delete
-              find /opt/airflow/logs -type d -empty -delete 2>/dev/null || true
-              echo "After cleanup:"
-              df -h /opt/airflow/logs
-              echo "Cleanup complete at $(date)"
-            volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-          volumes:
-          - name: logs
-            persistentVolumeClaim:
-              claimName: airflow-logs
-EOF'
-```
+- **Log groomer sidecars** (`retentionDays: 2`) on each worker, scheduler, triggerer, and dag-processor automatically delete log files older than 2 days
+- **Cleanup CronJob** (`airflow-cleanup`, every 30 minutes) purges old `dag_run`, `task_instance`, and other metadata tables older than 2 days
+- **Pod cleanup** removes completed/failed K8s pods from the namespace
 
-Verify and test:
+Verify both are active after helm install:
 
 ```bash
-# Check CronJob exists
-$SSH_CMD "kubectl get cronjobs -n $NAMESPACE | grep log-cleanup"
+# Check the cleanup CronJob exists
+$SSH_CMD "kubectl get cronjobs -n $NAMESPACE"
 
-# Trigger a manual run
-$SSH_CMD "kubectl create job --from=cronjob/airflow-log-cleanup airflow-log-cleanup-now -n $NAMESPACE"
+# Trigger a manual run to verify it works
+$SSH_CMD "kubectl create job --from=cronjob/airflow-cleanup airflow-cleanup-test -n $NAMESPACE"
+$SSH_CMD "kubectl logs job/airflow-cleanup-test -n $NAMESPACE"
+$SSH_CMD "kubectl delete job airflow-cleanup-test -n $NAMESPACE"
 
-# Check logs (may take several minutes on Longhorn/NFS)
-$SSH_CMD "kubectl logs job/airflow-log-cleanup-now -n $NAMESPACE"
+# Check log groomer is running in worker sidecars
+$SSH_CMD "kubectl logs airflow-worker-0 -c worker-log-groomer -n $NAMESPACE --tail=5"
 ```
 
-**Symptoms of full logs volume:**
-- Worker logs show: `OSError: [Errno 28] No space left on device`
+**Symptoms of missing cleanup (if these appear, verify cleanup is active):**
+- Worker logs show: `OSError: [Errno 28] No space left on device` (logs volume full or inodes exhausted)
 - Scheduler logs show: `executor_state=failed` for tasks that never started
 - All DAGs fail simultaneously
+- `df -hi` on logs volume shows 100% inode usage even with space available
 
 ---
 
@@ -998,15 +965,21 @@ $SSH_CMD "kubectl run cache-clear --rm -i --restart=Never \
 ### Logs volume full (all jobs suddenly failing)
 
 ```bash
-# Check logs volume usage
-$SSH_CMD "kubectl exec deployment/airflow-worker -n $NAMESPACE -c worker -- df -h /opt/airflow/logs"
+# Check logs volume usage (both space AND inodes)
+$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- df -h /opt/airflow/logs"
+$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- df -hi /opt/airflow/logs"
 
-# Emergency cleanup: delete logs older than 3 days
+# Emergency cleanup: delete log directories older than 6 hours
 $SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- \
-  find /opt/airflow/logs -type f -mtime +3 -delete"
+  bash -c 'find /opt/airflow/logs -mindepth 2 -maxdepth 2 -type d -mmin +360 | xargs rm -rf'"
 
-# Deploy the log cleanup CronJob (see Post-Setup section) to prevent recurrence
+# Verify the helm cleanup CronJob is running (should exist from helm install)
+$SSH_CMD "kubectl get cronjobs -n $NAMESPACE"
+
+# If missing, ensure cleanup.enabled is true in helm values and run helm upgrade
 ```
+
+**Note:** Inode exhaustion (`df -hi` shows 100%) causes the same symptoms as disk full even when `df -h` shows space available. With many DAGs on frequent schedules, each run creates directories that consume inodes rapidly.
 
 ### Schema changes not taking effect
 
