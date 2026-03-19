@@ -27,7 +27,7 @@ MERGE_DBNAME: str = "merge_db"
 AIRFLOW_HOST: str = "PLACEHOLDER_PG_FQDN"
 AIRFLOW_PORT: int = 5432
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
-DATASURFACE_VERSION: str = "1.1.0"
+DATASURFACE_VERSION: str = "1.2.6"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:
