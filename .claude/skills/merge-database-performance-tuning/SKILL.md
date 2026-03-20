@@ -104,3 +104,36 @@ SELECT count(*) FROM pg_stat_activity WHERE datname = 'merge_db';
 | Deadlock risk | High (scheduler vs UI on `dag` table) | Low (jobs operate on separate stream tables) |
 | Autovacuum pressure | Moderate | High (staging table churn) |
 | WAL volume | Moderate | High |
+
+## SQL Server
+
+SQL Server requires database-level configuration before use as a merge store or CQRS target. Without these settings, concurrent operations will deadlock.
+
+### Required Settings
+
+```sql
+-- Enable optimistic concurrency (MVCC) — MANDATORY
+-- Without this, SQL Server uses pessimistic locking that causes deadlocks
+-- under concurrent access from multi-threaded CQRS sync or parallel ingestion
+ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON;
+
+-- For CQRS targets only: enable delayed durability for higher write throughput
+-- Batches transaction log writes (small risk of losing last few ms on crash)
+-- Safe because CQRS data can be re-synced from the source
+ALTER DATABASE [your_cqrs_database] SET DELAYED_DURABILITY = FORCED;
+```
+
+**Note:** `DELAYED_DURABILITY` cannot be enabled on databases with CDC enabled.
+
+### Verification
+
+```sql
+SELECT name, is_read_committed_snapshot_on, delayed_durability_desc
+FROM sys.databases WHERE name = 'your_database';
+```
+
+### VM/Hypervisor Disk Configuration
+
+If SQL Server runs in a VM (Proxmox, VMware, Hyper-V), ensure the virtual disk is configured for SSD:
+- Proxmox: `ssd=1,discard=on,iothread=1` on the SCSI disk
+- Without SSD flags, log write latency can be 10x higher (68ms vs 6ms) even on NVMe hosts

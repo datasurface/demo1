@@ -310,6 +310,44 @@ kubectl logs -n $NAMESPACE $(kubectl get pods -n $NAMESPACE --no-headers | \
 | `Invalid object name 'scd2_batch_metrics'` | Shared infra tables missing on CQRS target | Run infra-merge (creates tables via `createCommonTablesOnContainer`) |
 | `SSL connection has been closed unexpectedly` | Source DB restarted during sync | Transient — retries will succeed |
 | `Login timeout expired` (SQL Server) | Network/firewall issue to CQRS target | Check connectivity from K8s pod to target DB |
+| `Transaction was deadlocked on lock resources` (SQL Server) | Missing `READ_COMMITTED_SNAPSHOT` on database | See "SQL Server Database Prerequisites" below |
+
+---
+
+## SQL Server Database Prerequisites
+
+SQL Server defaults to pessimistic locking which causes deadlocks under concurrent access. These database-level settings must be applied by the DBA before DataSurface can use a SQL Server database as a merge store or CQRS target.
+
+### Required: READ_COMMITTED_SNAPSHOT
+
+```sql
+-- Enables optimistic concurrency (MVCC) — eliminates reader-writer deadlocks
+-- This is equivalent to how PostgreSQL, MySQL, Oracle behave by default
+ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON;
+```
+
+Without this setting, concurrent threads performing SELECT and UPDATE on shared tables (`scd2_batch_metrics`, `scd2_batch_counter`) will deadlock. This affects multi-threaded CQRS sync and any scenario with concurrent ingestion jobs writing to the same SQL Server database.
+
+**Verify:**
+```sql
+SELECT name, is_read_committed_snapshot_on FROM sys.databases WHERE name = 'your_database';
+```
+
+### Recommended for CQRS targets: DELAYED_DURABILITY
+
+```sql
+-- Batches transaction log writes for higher throughput (small risk of losing last few ms on crash)
+-- Safe for CQRS targets since data can be re-synced from source
+ALTER DATABASE [your_cqrs_database] SET DELAYED_DURABILITY = FORCED;
+```
+
+**Note:** Cannot be enabled on databases with Change Data Capture (CDC) enabled.
+
+### Symptoms of missing settings
+
+- `Transaction (Process ID X) was deadlocked on lock resources` — missing `READ_COMMITTED_SNAPSHOT`
+- Log write latency > 50ms with SSD storage — missing `DELAYED_DURABILITY`
+- Multi-threaded CQRS jobs failing intermittently — both settings likely missing
 
 ---
 
