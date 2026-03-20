@@ -245,9 +245,11 @@ kubectl create secret docker-registry datasurface-registry \
   --docker-password="$GITLAB_CUSTOMER_TOKEN" \
   -n $NAMESPACE
 
-# Attach image pull secret to default service account
+# Attach image pull secret to default service account (for job pods)
 kubectl patch serviceaccount default -n $NAMESPACE \
   -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
+# Note: Airflow service accounts get the registry secret automatically
+# via registry.secretName in the helm values
 ```
 
 **Checkpoint:** Run `kubectl get secrets -n $NAMESPACE` - should show all 6 secrets:

@@ -7,8 +7,12 @@ executor: CeleryExecutor
 # Standard Apache Airflow image
 images:
   airflow:
-    repository: apache/airflow
-    tag: "3.1.7"
+    repository: registry.gitlab.com/datasurface-inc/datasurface/airflow
+    tag: "3.1.8-azure"
+
+# Registry secret for pulling custom Airflow image from GitLab
+registry:
+  secretName: datasurface-registry
 
 # External Aurora PostgreSQL
 postgresql:

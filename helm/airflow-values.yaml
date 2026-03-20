@@ -6,8 +6,13 @@ executor: CeleryExecutor
 # Airflow version
 images:
   airflow:
-    repository: apache/airflow
-    tag: "3.1.7"
+    repository: registry.gitlab.com/datasurface-inc/datasurface/airflow
+    tag: "3.1.8-azure"
+
+# Registry secret for pulling custom Airflow image from GitLab
+# The secret must be created before helm install (see setup walkthrough Step 4)
+registry:
+  secretName: datasurface-registry
 
 # External PostgreSQL (running in Docker, accessible via host.docker.internal)
 postgresql:
