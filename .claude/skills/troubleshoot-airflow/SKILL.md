@@ -391,6 +391,50 @@ helm upgrade airflow apache-airflow/airflow -n $NAMESPACE \
 
 ---
 
+## Scheduler Throughput (Slow Task Dispatch)
+
+Symptoms: DAG runs complete successfully but wall-clock time is much longer than actual task execution time. Tasks wait 30-60+ seconds before starting, even though executor slots are available and Celery queue wait is under 1 second.
+
+### Diagnose
+
+Measure the gap between DAG start and first task start:
+
+```sql
+-- Run against the Airflow metadata database
+SELECT
+  avg(extract(epoch from (ti.start_date - dr.start_date)))::numeric(10,1) as first_task_delay_sec,
+  avg(extract(epoch from (dr.end_date - dr.start_date)))::numeric(10,1) as dag_total_sec,
+  count(*) as runs
+FROM dag_run dr
+JOIN task_instance ti ON ti.run_id = dr.run_id AND ti.dag_id = dr.dag_id
+  AND ti.task_id = 'snapshot_merge_job'
+WHERE dr.dag_id LIKE 'scd2__Customer%' AND dr.state = 'success' AND ti.state = 'success'
+  AND dr.start_date > now() - interval '10 minutes';
+```
+
+If `first_task_delay_sec` is >> 10 seconds while Celery queue wait is < 1 second, the bottleneck is the scheduler loop, not the executor.
+
+### Root cause
+
+The scheduler processes task instances in batches controlled by `max_tis_per_query`. The **default is 16**, meaning the scheduler queries and evaluates only 16 task instances per database query. With 100+ DAGs × 4 tasks each, it takes many rounds to process all pending tasks.
+
+### Fix
+
+```yaml
+# In helm values under config.scheduler:
+config:
+  scheduler:
+    max_tis_per_query: "512"              # Default 16 — batch more tasks per query
+    max_dagruns_to_create_per_loop: "100"  # Default 10 — create more DAG runs per cycle
+    max_dagruns_per_loop_to_schedule: "200" # Default 20 — evaluate more runs per cycle
+```
+
+**Impact measured:** At 100 DAGs, first-task delay dropped from 66 sec to 7 sec after increasing `max_tis_per_query` from 16 to 512.
+
+**Warning:** Setting `max_tis_per_query` too high can increase metadata DB query complexity. 512 is safe for most deployments. Do not exceed `parallelism`.
+
+---
+
 ## Quick Health Check
 
 Run this to get a quick overview of Airflow health:
