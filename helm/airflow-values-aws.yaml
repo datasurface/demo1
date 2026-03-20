@@ -105,6 +105,9 @@ config:
     delete_local_logs: "False"
   scheduler:
     dag_dir_list_interval: "60"
+    max_tis_per_query: "512"
+    max_dagruns_to_create_per_loop: "100"
+    max_dagruns_per_loop_to_schedule: "200"
 
 # Cleanup CronJob - purges old metadata to prevent scheduler slowdown
 cleanup:
