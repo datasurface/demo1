@@ -22,8 +22,9 @@ Before starting, verify the user has:
 - [ ] Azure CLI installed and logged in (`az account show` succeeds)
 - [ ] `kubectl` CLI installed
 - [ ] `helm` CLI installed
-- [ ] GitHub Personal Access Token (needs repo access)
+- [ ] GitHub Personal Access Token (**must have `repo` scope** for pushing to model/DAG repos; if you only need to push to existing repos, fine-grained tokens scoped to those repos work too — but `repo` scope is required if the agent needs to create new repositories)
 - [ ] GitLab credentials for DataSurface images
+- [ ] If using Bitwarden to store credentials: run `bw sync` after adding new items from another session before attempting to retrieve them
 
 Ask the user for these environment variables if not already set:
 
@@ -152,11 +153,31 @@ az keyvault secret purge --vault-name $KEY_VAULT_NAME \
   --name "datasurface--${NAMESPACE}--Demo--git--credentials" 2>/dev/null || true
 ```
 
+#### 0e. Clean up GitHub repository tags and releases (if reusing repos)
+
+**CRITICAL:** If the model or DAG repositories were used in a previous deployment, stale tags and releases will cause the `VersionPatternReleaseSelector` to find old commits with wrong hostnames/config. The infrastructure DAG and all job pods resolve the model via the GitHub Releases API — a stale release pointing to an old commit means every job runs against the wrong configuration, and the error ("No tags found matching pattern") is misleading because the tag exists but the release doesn't match.
+
+```bash
+# Delete all tags and releases from the model repo
+for tag in $(gh release list --repo $MODEL_REPO --json tagName -q '.[].tagName'); do
+  gh release delete "$tag" --repo $MODEL_REPO --yes 2>/dev/null || true
+  git push origin ":refs/tags/$tag" 2>/dev/null || true
+done
+
+# Delete all tags and releases from the DAG repo
+for tag in $(gh release list --repo $AIRFLOW_REPO --json tagName -q '.[].tagName'); do
+  gh release delete "$tag" --repo $AIRFLOW_REPO --yes 2>/dev/null || true
+  git push origin ":refs/tags/$tag" 2>/dev/null || true
+done
+```
+
 **Checkpoint:**
 - `az group exists --name $RESOURCE_GROUP` returns `false`
 - `kubectl get namespace $NAMESPACE` returns "not found"
 - `az keyvault show --name $KEY_VAULT_NAME` returns "not found" or has been purged
 - No lingering soft-deleted secrets in Key Vault
+- `gh release list --repo $MODEL_REPO` returns empty
+- `gh release list --repo $AIRFLOW_REPO` returns empty
 
 ---
 
@@ -345,7 +366,23 @@ SQL_SERVER_FQDN="${SQL_SERVER_NAME}.database.windows.net"
 echo "SQL Server FQDN: $SQL_SERVER_FQDN"
 ```
 
-#### 5a. Create Private Endpoint for Azure SQL
+#### 5a. Azure SQL Networking
+
+There are two approaches for AKS-to-SQL connectivity. **For test/dev environments, use the simpler public access approach** (Option B below). Private endpoints (Option A) are more secure but have known issues with NIC IP assignment that can require significant debugging.
+
+##### Option A: Private Endpoint (Production)
+
+**WARNING:** The private endpoint NIC may report `privateIpAddress: None` immediately after creation. This is a known Azure timing issue. If `PE_IP` comes back empty, wait 60-120 seconds and retry the NIC query. You can also query the IP via the private endpoint's `customDnsConfigs`:
+
+```bash
+# Alternative way to get the PE IP if ipConfigurations returns None
+az network private-endpoint show \
+  --resource-group $RESOURCE_GROUP \
+  --name "${SQL_SERVER_NAME}-pe" \
+  --query "customDnsConfigs[0].ipAddresses[0]" -o tsv
+```
+
+For production deployments, the private endpoint **must** work — do not fall back to public access. If the IP remains empty after multiple retries, delete and recreate the private endpoint.
 
 To allow AKS pods to reach Azure SQL over the VNet (without public internet):
 
@@ -406,7 +443,9 @@ az network private-dns record-set a add-record \
   --ipv4-address $PE_IP
 ```
 
-**Alternative (simpler but less secure):** If you prefer public access during setup, skip the private endpoint and instead add a VNet firewall rule:
+##### Option B: Public Access with Firewall Rules (Test/Dev — Recommended for Walkthroughs)
+
+**This is the simpler and more reliable approach.** Enable public access and restrict it to Azure services and your VNet:
 
 ```bash
 # Only if NOT using private endpoint:
@@ -429,6 +468,14 @@ az network vnet subnet update \
   --vnet-name $VNET_NAME \
   --name aks-subnet \
   --service-endpoints Microsoft.Sql
+
+# Allow Azure services (required for AKS pods to reach SQL via Azure backbone)
+az sql server firewall-rule create \
+  --resource-group $RESOURCE_GROUP \
+  --server $SQL_SERVER_NAME \
+  --name AllowAzureServices \
+  --start-ip-address 0.0.0.0 \
+  --end-ip-address 0.0.0.0
 ```
 
 **Checkpoint:**
@@ -529,18 +576,27 @@ kubectl run db-test --rm -i --restart=Never \
 
 ### Step 8: Install Secrets Store CSI Driver and Azure Provider
 
+**NOTE: For test/dev environments, you can skip this step entirely** and use plain Kubernetes secrets instead (Steps 16, 18, and 23 create the necessary K8s secrets). The CSI Secrets Store driver is only needed if you want to sync Azure Key Vault secrets directly into pods. If you skip this step, also skip Steps 10b-10c (Workload Identity federation) and Step 21 (SA annotations for Workload Identity). The Key Vault created in Step 6 is still useful for storing secrets centrally even without CSI — you just manage K8s secrets manually.
+
+If you do want CSI Secrets Store (recommended for production):
+
+**IMPORTANT:** Install the Azure provider Helm chart, which includes the CSI driver as a dependency. Do NOT install them separately — installing the CSI driver first and the Azure provider second causes hostPort conflicts (port 9808) and DaemonSet scheduling failures on multi-node clusters.
+
 ```bash
-helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+helm repo add csi-secrets-store-provider-azure \
+  https://azure.github.io/secrets-store-csi-driver-provider-azure/charts
 helm repo update
 
-helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver \
-  --namespace kube-system
+helm install csi-azure csi-secrets-store-provider-azure/csi-secrets-store-provider-azure \
+  --namespace kube-system \
+  --set secrets-store-csi-driver.install=true
+```
 
-# Install Azure Key Vault provider for the CSI driver
-kubectl apply -f https://raw.githubusercontent.com/Azure/secrets-store-csi-driver-provider-azure/master/deployment/provider-azure-installer.yaml
+Wait for all pods to be ready:
 
-# Wait for provider pods
-kubectl wait --for=condition=ready pod -l app=csi-secrets-store-provider-azure -n kube-system --timeout=60s
+```bash
+kubectl wait --for=condition=ready pod -l app=csi-secrets-store-provider-azure -n kube-system --timeout=120s
+kubectl wait --for=condition=ready pod -l app=secrets-store-csi-driver -n kube-system --timeout=120s
 ```
 
 **Checkpoint:**
@@ -551,6 +607,8 @@ kubectl get pods -n kube-system -l app=secrets-store-csi-driver
 ```
 
 Both CSI driver and Azure provider pods should be `Running`.
+
+**Troubleshooting:** If provider pods are `Pending` with "didn't have free ports" errors, the CSI driver and provider were likely installed separately. Uninstall both (`helm uninstall <release-name> -n kube-system`), wait for all pods to terminate, then reinstall using the single command above.
 
 ---
 
@@ -710,19 +768,21 @@ The Azure deployment requires a custom Airflow image that includes `pymssql` and
 This image is **pre-built and hosted on the GitLab registry** alongside the other DataSurface images:
 
 ```
-registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.7-azure
+registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.8-azure
 ```
 
 It is pulled using the same `datasurface-registry` imagePullSecret created in Step 18 -- no additional registry setup is needed.
 
-Verify you can pull the image:
+Verify you can pull the image. If Docker is available locally:
 
 ```bash
 docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.7-azure
+docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/airflow:3.1.8-azure
 ```
 
-**Checkpoint:** Image pulls successfully and contains:
+If Docker is **not** available (e.g., headless server), skip the local pull — the AKS nodes will pull the image using the `datasurface-registry` imagePullSecret created in Step 18. You can verify it works after Helm install by checking pod status. Do NOT try to query the GitLab Container Registry API with deploy tokens — they don't support it.
+
+**Checkpoint:** Image pulls successfully (or is deferred to AKS) and contains:
 - `pymssql`
 - `azure-identity`
 - `azure-keyvault-secrets`
@@ -837,19 +897,31 @@ git tag v1.0.0-demo
 git push origin v1.0.0-demo
 ```
 
-**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** -- git tags alone are not sufficient. You must create a GitHub Release from the tag:
+**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** — git tags alone are not sufficient. A git tag without a corresponding GitHub Release will cause all job pods to fail with "No tags found matching pattern" even though the tag exists in the repository.
 
-1. Go to `https://github.com/$MODEL_REPO/releases/new`
-2. Select the `v1.0.0-demo` tag
-3. Set the release title to `v1.0.0-demo`
-4. Ensure **"Set as a pre-release"** is **unchecked** (must be a stable release)
-5. Click **"Publish release"**
+```bash
+gh release create v1.0.0-demo \
+  --repo $MODEL_REPO \
+  --title "v1.0.0-demo" \
+  --notes "Azure deployment model release" \
+  --latest
+```
+
+**Note:** The `--latest` flag marks this as the latest stable release (not a pre-release). The `STABLE_ONLY` selector filters out pre-releases and drafts.
 
 **Checkpoint:**
+
+```bash
+# Verify the release exists and is not a pre-release or draft
+gh api repos/$MODEL_REPO/releases/latest --jq '{tag: .tag_name, draft: .draft, prerelease: .prerelease}'
+```
+
+Must show `"tag": "v1.0.0-demo"`, `"draft": false`, `"prerelease": false`.
+
+Also verify:
 - `git remote -v` shows the target model repository
 - `git log -1` shows the configure commit
 - `git tag` shows `v1.0.0-demo`
-- Verify on GitHub that the repository has the tag AND a **published Release** (not pre-release) for `v1.0.0-demo`
 
 ---
 
@@ -1075,9 +1147,13 @@ All Airflow pods should reach `Running` state:
 
 ---
 
-### Step 21: Annotate All Airflow Service Accounts with Workload Identity
+### Step 21: Verify Workload Identity on All Airflow Pods
 
-The Helm chart's `serviceAccount` block only creates the `airflow-worker` SA with the Workload Identity annotation. The dag-processor, scheduler, and triggerer also need Key Vault access because the infrastructure DAG reads secrets at parse time via `AzureKeyVaultSecretManager`. Annotate and label all Airflow SAs:
+The Helm values file sets `AZURE_CLIENT_ID` as a global environment variable (in the `env:` section) so that **all** Airflow pods can authenticate to Azure Key Vault. This is critical because the infrastructure DAG reads secrets at parse time via `AzureKeyVaultSecretManager` — meaning the dag-processor and scheduler need Azure credentials, not just the worker.
+
+**Why a global env var instead of per-SA annotations?** The Helm chart creates separate service accounts for each component (worker, dag-processor, scheduler, triggerer, api-server), but the `serviceAccount:` block only annotates `airflow-worker`. The Workload Identity webhook only injects `AZURE_CLIENT_ID` for SAs that have the annotation. Rather than chasing every SA, setting `AZURE_CLIENT_ID` in the global `env:` block ensures every pod gets it regardless of which SA it uses. This also covers dynamically created DAGs and any future Helm chart SA changes.
+
+As a safety net, also annotate and label all Airflow SAs:
 
 ```bash
 # Annotate all Airflow service accounts with Workload Identity client ID
@@ -1372,6 +1448,14 @@ kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- 
 kubectl port-forward svc/airflow-api-server 8080:8080 -n $NAMESPACE
 ```
 
+Verify Airflow is healthy (use the **Airflow 3.x** health endpoint — `/api/v1/health` was removed):
+
+```bash
+curl -s http://localhost:8080/api/v2/monitor/health | python3 -c "import sys,json; d=json.load(sys.stdin); print('DB:', d['metadatabase']['status'], '| Scheduler:', d['scheduler']['status'])"
+```
+
+Both should show `healthy`.
+
 Open <http://localhost:8080> in your browser:
 - Username: `admin`
 - Password: `admin123`
@@ -1534,7 +1618,28 @@ kubectl run db-test --rm -i --restart=Never \
 
 ---
 
-### Azure SQL Connectivity
+### Azure SQL Database Creation and Connectivity
+
+**Creating additional databases on Azure SQL:** Unlike on-prem SQL Server, Azure SQL requires you to connect to the `master` database to run `CREATE DATABASE`. You cannot create databases from within the target database. Also, `CREATE DATABASE` is an **asynchronous** operation on Azure SQL and can take 30-60 seconds. When using Python drivers (pymssql/pyodbc), you **must** enable autocommit mode — `CREATE DATABASE` cannot run inside a transaction.
+
+The recommended approach for creating additional databases from within AKS pods:
+
+```bash
+kubectl run sql-setup --rm -i --restart=Never \
+  --image=mcr.microsoft.com/mssql-tools18:latest \
+  --env="ACCEPT_EULA=Y" \
+  -- /opt/mssql-tools18/bin/sqlcmd \
+    -S $SQL_SERVER_FQDN \
+    -U $SQL_ADMIN_USER \
+    -P "$SQL_ADMIN_PASSWORD" \
+    -d master \
+    -C \
+    -Q "CREATE DATABASE customer_db;"
+```
+
+**Note:** The `-C` flag trusts the server certificate (required for Azure SQL). Use `mssql-tools18` (not `mssql-tools`) for Azure SQL connections.
+
+**Note:** The FQDN is `<server-name>.database.windows.net` — a common mistake is using `.database.windows.com` which will fail with "Adaptive Server is unavailable."
 
 **Symptoms:** Merge jobs fail with "Login timeout expired", "Cannot open server", or ODBC connection errors.
 
@@ -1542,10 +1647,10 @@ Test connectivity from inside a pod:
 
 ```bash
 kubectl run sql-test --rm -i --restart=Never \
-  --image=mcr.microsoft.com/mssql-tools:latest \
+  --image=mcr.microsoft.com/mssql-tools18:latest \
   --env="ACCEPT_EULA=Y" \
   -n $NAMESPACE \
-  -- /opt/mssql-tools/bin/sqlcmd -S $SQL_SERVER_FQDN -U $SQL_ADMIN_USER -P "$SQL_ADMIN_PASSWORD" -d merge_db -Q "SELECT 1"
+  -- /opt/mssql-tools18/bin/sqlcmd -S $SQL_SERVER_FQDN -U $SQL_ADMIN_USER -P "$SQL_ADMIN_PASSWORD" -d merge_db -C -Q "SELECT 1"
 ```
 
 **Common causes and fixes:**
@@ -1767,7 +1872,7 @@ kubectl describe pod <pod-name> -n $NAMESPACE | grep -A5 "Events:"
    # For ACR:
    az acr repository show-tags --name $ACR_NAME --repository airflow -o table
    # For GitLab:
-   docker manifest inspect <your-registry>/airflow:3.1.7-azure
+   docker manifest inspect <your-registry>/airflow:3.1.8-azure
    ```
 
 ---
@@ -1910,7 +2015,7 @@ while az aks show --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME 2>/dev/n
 | Storage | standard/hostpath | Azure Files NFS (azurefile-csi-nfs) |
 | Infrastructure | None | `az` CLI commands (Resource Group, VNet, AKS, etc.) |
 | Auth | None | Workload Identity (Managed Identity + Federated Credentials) |
-| Airflow image | apache/airflow:3.1.7 | Custom with pymssql + azure-identity + azure-keyvault-secrets |
+| Airflow image | apache/airflow:3.1.8 | Custom with pymssql + azure-identity + azure-keyvault-secrets |
 | Git cache | ReadWriteOnce | ReadWriteMany |
 | Network | localhost | VNet + private endpoints + private DNS zones |
 | Node type | Docker Desktop | Standard_D2s_v3 (2 vCPU, 8 GB RAM) |

@@ -137,11 +137,19 @@ serviceAccount:
   labels:
     azure.workload.identity/use: "true"
 
-# Azure Key Vault URL for DAG secret resolution
-# The infrastructure DAG's AzureKeyVaultSecretManager reads this at parse time
+# Azure credentials for DAG secret resolution
+# The infrastructure DAG's AzureKeyVaultSecretManager reads Key Vault at parse time,
+# which means ALL pods (dag-processor, scheduler, worker, triggerer) need these credentials.
+# AZURE_CLIENT_ID MUST be set here as a global env var — the Workload Identity webhook
+# only injects it for pods whose SA has the client-id annotation, but the Helm chart
+# creates separate SAs for each component and only airflow-worker gets the annotation.
+# Without AZURE_CLIENT_ID in the global env, dag-processor and scheduler pods cannot
+# authenticate to Key Vault, causing DAGs to silently fail to serialize.
 env:
   - name: AZURE_KEY_VAULT_URL
     value: "PLACEHOLDER_KEY_VAULT_URL"
+  - name: AZURE_CLIENT_ID
+    value: "PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID"
 
 # PgBouncer connection pooler - transaction mode returns connections to the pool
 # after each transaction, preventing stale connection issues after DB restarts
