@@ -867,7 +867,7 @@ rm -f /tmp/airflow-values-azure.yaml.bak
 
 **Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
 
-**IMPORTANT:** The `rte_azure.py` values are baked into the model and committed to the repository. Task pods spawned by the infrastructure DAG load the model from git at runtime and do NOT have access to environment variables like `MERGE_HOST` or `SQL_SERVER_FQDN`. All deployment-specific values must be string literals in the committed file, not `os.environ` lookups.
+**IMPORTANT:** The `rte_azure.py` and `eco.py` files in the repository start with `PLACEHOLDER_*` markers — this is intentional so the repo serves as a reusable template. The `sed` replacements in this step modify your **local working copy** with real Azure resource values. These customized files are then committed and pushed in Step 15. Task pods spawned by the infrastructure DAG load the model from git at runtime and do NOT have access to environment variables like `MERGE_HOST` or `SQL_SERVER_FQDN`. All deployment-specific values must be string literals in the committed file, not `os.environ` lookups.
 
 **Note:** The Helm values file includes `sslmode: require` in the `metadataConnection` block. This is required for Azure Database for PostgreSQL Flexible Server connections and should not be removed.
 
