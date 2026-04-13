@@ -1,9 +1,7 @@
 """
-// Copyright (c) 2026 William Newport
-// SPDX-License-Identifier: BUSL-1.1
+Copyright (c) 2026 DataSurface Inc. All Rights Reserved.
+Proprietary Software - See LICENSE.txt for terms.
 
-This is a starter datasurface repository. It defines a simple Ecosystem using YellowDataPlatform with Live and Forensic modes.
-It will generate 2 pipelines, one with live records only and the other with full milestoning.
 """
 
 from datasurface.dsl import InfrastructureVendor, InfrastructureLocation, Ecosystem, CloudVendor, RuntimeDeclaration
