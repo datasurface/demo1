@@ -15,7 +15,7 @@ datasurface-mr-validator:
     DOCKER_TLS_CERTDIR: ""
     GIT_STRATEGY: none
     GITLAB_CLONE_HOST: gitlab.local
-    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.5
+    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7
     BASE_REPOSITORY: http://gitlab.local/$CI_PROJECT_PATH
     HEAD_REPOSITORY: http://gitlab.local/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
     HEAD_BRANCH: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
