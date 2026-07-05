@@ -307,7 +307,7 @@ kubectl logs -n $NAMESPACE $(kubectl get pods -n $NAMESPACE --no-headers | \
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `Invalid object name 'scd2_batch_metrics'` | Shared infra tables missing on CQRS target | Run infra-merge (creates tables via `createCommonTablesOnContainer`) |
+| `Invalid object name 'scd4_batch_metrics'` | Shared infra tables missing on CQRS target | Run infra-merge (creates tables via `createCommonTablesOnContainer`) |
 | `SSL connection has been closed unexpectedly` | Source DB restarted during sync | Transient — retries will succeed |
 | `Login timeout expired` (SQL Server) | Network/firewall issue to CQRS target | Check connectivity from K8s pod to target DB |
 | `Transaction was deadlocked on lock resources` (SQL Server) | Missing `READ_COMMITTED_SNAPSHOT` on database | See "SQL Server Database Prerequisites" below |
@@ -326,7 +326,7 @@ SQL Server defaults to pessimistic locking which causes deadlocks under concurre
 ALTER DATABASE [your_database] SET READ_COMMITTED_SNAPSHOT ON;
 ```
 
-Without this setting, concurrent threads performing SELECT and UPDATE on shared tables (`scd2_batch_metrics`, `scd2_batch_counter`) will deadlock. This affects multi-threaded CQRS sync and any scenario with concurrent ingestion jobs writing to the same SQL Server database.
+Without this setting, concurrent threads performing SELECT and UPDATE on shared tables (`scd4_batch_metrics`, `scd4_batch_counter`) will deadlock. This affects multi-threaded CQRS sync and any scenario with concurrent ingestion jobs writing to the same SQL Server database.
 
 **Verify:**
 ```sql
@@ -446,7 +446,7 @@ SELECT
 FROM dag_run dr
 JOIN task_instance ti ON ti.run_id = dr.run_id AND ti.dag_id = dr.dag_id
   AND ti.task_id = 'snapshot_merge_job'
-WHERE dr.dag_id LIKE 'scd2__Customer%' AND dr.state = 'success' AND ti.state = 'success'
+WHERE dr.dag_id LIKE 'scd4__Customer%' AND dr.state = 'success' AND ti.state = 'success'
   AND dr.start_date > now() - interval '10 minutes';
 ```
 

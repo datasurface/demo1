@@ -469,8 +469,8 @@ Expected tables created by ring1-init:
 - `demo_psp_factory_dags`
 - `demo_psp_cqrs_dags`
 - `demo_psp_dc_reconcile_dags`
-- `scd2_airflow_dsg`
-- `scd2_airflow_datatransformer`
+- `scd4_airflow_dsg`
+- `scd4_airflow_datatransformer`
 
 **Checkpoint:** All pods running, jobs completed (1/1), tables exist in merge_db
 
@@ -486,11 +486,11 @@ Expected DAGs (5 total):
 
 | DAG ID | Status | Description |
 |--------|--------|-------------|
-| `scd2_factory_dag` | Active | Factory DAG for SCD2 pipelines |
+| `scd4_factory_dag` | Active | Factory DAG for SCD4 pipelines |
 | `Demo_PSP_K8sMergeDB_reconcile` | Active | DataContainer reconciliation |
 | `Demo_PSP_default_K8sMergeDB_cqrs` | Active | CQRS DAG |
 | `demo-psp_infrastructure` | Paused | Infrastructure management |
-| `scd2_datatransformer_factory` | Paused | DataTransformer factory |
+| `scd4_datatransformer_factory` | Paused | DataTransformer factory |
 
 **Checkpoint:** All 5 DAGs appear in the list. If DAGs are missing, check for import errors:
 

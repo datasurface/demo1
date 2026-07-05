@@ -1043,11 +1043,11 @@ Expected DAGs (5 total):
 
 | DAG ID | Description |
 |--------|-------------|
-| `scd2_factory_dag` | Factory DAG for SCD2 pipelines |
+| `scd4_factory_dag` | Factory DAG for SCD4 pipelines |
 | `Demo_PSP_K8sMergeDB_reconcile` | DataContainer reconciliation |
 | `Demo_PSP_default_K8sMergeDB_cqrs` | CQRS DAG |
 | `demo-psp_infrastructure` | Infrastructure management |
-| `scd2_datatransformer_factory` | DataTransformer factory |
+| `scd4_datatransformer_factory` | DataTransformer factory |
 
 Check for import errors:
 
