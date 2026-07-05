@@ -43,7 +43,7 @@ SELECT
   ) as time_slot,
   count(*) as batches,
   count(DISTINCT key) as active_streams
-FROM scd2_batch_metrics
+FROM scd4_batch_metrics
 WHERE batch_end_time > now() - interval '6 hours'
   AND batch_status = 'committed'
 GROUP BY date_trunc('hour', batch_end_time) +

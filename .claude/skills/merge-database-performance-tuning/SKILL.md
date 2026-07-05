@@ -1,10 +1,10 @@
 ---
 name: Merge Database Performance Tuning
-description: Tune the DataSurface Yellow merge database for production workloads. Covers PostgreSQL configuration for connection limits, memory, and write-heavy SCD2 ingestion patterns.
+description: Tune the DataSurface Yellow merge database for production workloads. Covers PostgreSQL configuration for connection limits, memory, and write-heavy SCD4 ingestion patterns.
 ---
 # Merge Database Performance Tuning
 
-The merge database is where all ingestion and merge jobs write data. Under load, it handles high volumes of INSERTs and DELETEs on SCD2 staging tables, concurrent batch operations across many streams, and periodic CQRS sync reads. Without tuning, the default PostgreSQL configuration can become a bottleneck.
+The merge database is where all ingestion and merge jobs write data. Under load, it handles high volumes of INSERTs and DELETEs on SCD4 staging tables, concurrent batch operations across many streams, and periodic CQRS sync reads. Without tuning, the default PostgreSQL configuration can become a bottleneck.
 
 This guide covers tuning by database engine. Additional engines will be added as they are tested.
 
@@ -19,7 +19,7 @@ Reference environment: 50 CDC ingestion streams on 1-minute schedules, 3 CQRS jo
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | `max_connections` | 200 | Ingestion and merge jobs connect directly (not through pgbouncer). Each concurrent DAG run can hold 1-2 connections during its batch |
-| `shared_buffers` | 4 GB | ~25% of system RAM. SCD2 staging tables are heavily churned (insert + delete each cycle), so buffer cache is critical |
+| `shared_buffers` | 4 GB | ~25% of system RAM. SCD4 staging tables are heavily churned (insert + delete each cycle), so buffer cache is critical |
 | `effective_cache_size` | 12 GB | ~75% of system RAM. Tells the query planner how much OS page cache to expect |
 | `work_mem` | 64 MB | Per-operation sort/hash memory. Merge queries join staging to main tables and benefit from in-memory sorts |
 | `maintenance_work_mem` | 512 MB | For VACUUM and CREATE INDEX. Staging table churn generates dead tuples rapidly |
@@ -51,7 +51,7 @@ Always use `scram-sha-256` for network connections.
 
 ### Autovacuum Tuning
 
-SCD2 staging tables (`*_s` suffix) are high-churn: every batch cycle inserts rows, then the merge job deletes them after merging into the main table (`*_m` suffix). This creates dead tuples rapidly. The default autovacuum settings may not keep up:
+SCD4 staging tables (`*_s` suffix) are high-churn: every batch cycle inserts rows, then the merge job deletes them after merging into the main table (`*_m` suffix). This creates dead tuples rapidly. The default autovacuum settings may not keep up:
 
 ```sql
 -- Check dead tuple buildup on staging tables

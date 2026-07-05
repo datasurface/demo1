@@ -1,3 +1,8 @@
+---
+name: DataSurface AWS EKS Teardown Walkthrough
+description: Interactive walkthrough for completely tearing down a DataSurface Yellow environment on AWS EKS. Removes all Kubernetes resources, CloudFormation stacks, Secrets Manager secrets, EFS, and any lingering AWS resources. Use this skill to clean up an AWS installation.
+---
+
 # DataSurface AWS EKS Teardown Walkthrough
 
 This skill guides you through completely tearing down a DataSurface Yellow environment on AWS EKS. It removes all Kubernetes resources, CloudFormation stacks, Secrets Manager secrets, and any lingering AWS resources. Follow each step in order.

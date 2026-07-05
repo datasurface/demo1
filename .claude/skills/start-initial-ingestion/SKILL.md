@@ -28,16 +28,16 @@ Infrastructure → Factory → Ingestion → Reconcile/CQRS
 | DAG | Purpose |
 |-----|---------|
 | **demo-psp_infrastructure** | Main orchestrator. Loads model from git (tagged releases only), writes DAG configs to database, creates factory and system DAGs. |
-| **scd2_factory_dag** | Factory pattern. Reads ingestion configs from DB, dynamically creates/updates/removes ingestion DAGs. |
-| **scd2_datatransformer_factory** | Factory for DataTransformer jobs (masking, aggregation, derived columns). Creates transformer DAGs from DB configs. |
-| **scd2__CustomerDB_ingestion** | Dynamic ingestion DAG. Runs on cron schedule, snapshots source tables, writes to staging, performs SCD2 merge (tracks inserts/updates/deletes with history). |
+| **scd4_factory_dag** | Factory pattern. Reads ingestion configs from DB, dynamically creates/updates/removes ingestion DAGs. |
+| **scd4_datatransformer_factory** | Factory for DataTransformer jobs (masking, aggregation, derived columns). Creates transformer DAGs from DB configs. |
+| **scd4__CustomerDB_ingestion** | Dynamic ingestion DAG. Runs on cron schedule, snapshots source tables, writes to staging, performs SCD4 merge (maintains a current-snapshot table `..._m` plus a separate history table `..._mh`). |
 | **Demo_PSP_K8sMergeDB_reconcile** | Creates workspace views for consumers after ingestion tables exist. Maps DSG assignments to database views. |
 | **Demo_PSP_default_K8sMergeDB_cqrs** | CQRS replication. Copies merged data to target databases for querying. Separates write path (merge DB) from read paths. |
 
 ### Key Concepts
 
 - **Factory DAGs**: Don't process data themselves - they create other DAGs based on database configurations
-- **SCD2 Merge**: Slowly Changing Dimension Type 2 - tracks historical changes with insert/update/delete tracking
+- **SCD4 Merge**: Slowly Changing Dimension Type 4 - keeps a clean current-snapshot table (`..._m`) plus a separate history table (`..._mh`) tracking inserts/updates/deletes over time
 - **Reconcile**: Only works after ingestion has created the merge tables
 - **Tagged Releases**: System only picks up model versions matching `v*.*.*-demo` pattern
 
@@ -103,8 +103,8 @@ See `/create-k8-credential` skill for detailed credential creation.
 ```bash
 # Unpause all key DAGs FIRST
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_factory_dag
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_datatransformer_factory
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_factory_dag
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_datatransformer_factory
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
 ```
@@ -138,14 +138,14 @@ Expected DAGs:
 demo-psp_infrastructure          - Main infrastructure DAG (triggers model merge)
 Demo_PSP_K8sMergeDB_reconcile    - Creates workspace views after tables exist
 Demo_PSP_default_K8sMergeDB_cqrs - CQRS replication DAG
-scd2_datatransformer_factory     - Factory for data transformer DAGs
-scd2_factory_dag                 - Factory that creates ingestion DAGs
+scd4_datatransformer_factory     - Factory for data transformer DAGs
+scd4_factory_dag                 - Factory that creates ingestion DAGs
 ```
 
 ### 4c. Trigger Factory DAG to create ingestion DAGs
 
 ```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2_factory_dag
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4_factory_dag
 ```
 
 Wait ~15 seconds, then verify:
@@ -156,14 +156,14 @@ kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list | grep 
 
 Expected output:
 ```
-scd2__CustomerDB_ingestion
+scd4__CustomerDB_ingestion
 ```
 
 ### 4d. Unpause and trigger the ingestion DAG
 
 ```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2__CustomerDB_ingestion
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2__CustomerDB_ingestion
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4__CustomerDB_ingestion
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4__CustomerDB_ingestion
 ```
 
 ## Step 5: Verify Ingestion is Running
@@ -172,7 +172,7 @@ kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2
 
 ```bash
 kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -lt "/opt/airflow/logs/dag_id=scd2__CustomerDB_ingestion/" | head -5
+  ls -lt "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -5
 ```
 
 ### Check ingestion logs for success
@@ -180,11 +180,11 @@ kubectl exec -n demo1 airflow-worker-0 -c worker -- \
 ```bash
 # Get the latest run
 LATEST_RUN=$(kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -t "/opt/airflow/logs/dag_id=scd2__CustomerDB_ingestion/" | head -1)
+  ls -t "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -1)
 
 # Check for success
 kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  cat "/opt/airflow/logs/dag_id=scd2__CustomerDB_ingestion/$LATEST_RUN/task_id=snapshot_merge_job/attempt=1.log" | \
+  cat "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/$LATEST_RUN/task_id=snapshot_merge_job/attempt=1.log" | \
   grep -E "(RESULT_CODE|completed|Ingested|total_records)"
 ```
 
@@ -221,8 +221,8 @@ kubectl create secret generic customer-source-credential \
 
 # 3. Unpause all DAGs FIRST (triggers are ignored on paused DAGs)
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_factory_dag
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2_datatransformer_factory
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_factory_dag
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_datatransformer_factory
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
 kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
 
@@ -231,12 +231,12 @@ kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo
 sleep 20
 
 # 5. Trigger factory DAG to create ingestion DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2_factory_dag
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4_factory_dag
 sleep 15
 
 # 6. Unpause and trigger ingestion DAG (created by factory in step 5)
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd2__CustomerDB_ingestion
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd2__CustomerDB_ingestion
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4__CustomerDB_ingestion
+kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4__CustomerDB_ingestion
 ```
 
 ## Verifying Everything is Working
@@ -247,5 +247,5 @@ kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/
 
 # Check recent ingestion logs for success
 kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -lt "/opt/airflow/logs/dag_id=scd2__CustomerDB_ingestion/" | head -3
+  ls -lt "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -3
 ```

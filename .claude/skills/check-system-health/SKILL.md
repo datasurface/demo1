@@ -44,7 +44,7 @@ SELECT name FROM sys.databases WHERE database_id > 4;
 Check which one has recent batch activity:
 ```sql
 SELECT current_database(), max(batch_end_time), count(DISTINCT key) as streams
-FROM scd2_batch_metrics;
+FROM scd4_batch_metrics;
 ```
 
 ## Step 2: Batch Throughput Chart
@@ -62,7 +62,7 @@ SELECT
   ) as time_slot,
   count(*) as batches,
   count(DISTINCT key) as active_streams
-FROM scd2_batch_metrics
+FROM scd4_batch_metrics
 WHERE batch_end_time > now() - interval '2 hours'
   AND batch_status = 'committed'
 GROUP BY date_trunc('hour', batch_end_time) +

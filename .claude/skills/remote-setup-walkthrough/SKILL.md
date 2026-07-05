@@ -1,3 +1,8 @@
+---
+name: DataSurface Remote Cluster Setup Walkthrough
+description: Interactive walkthrough for setting up a DataSurface Yellow environment on a remote Kubernetes cluster accessed via SSH, using external PostgreSQL databases (separate hosts for Airflow metadata and merge data) and Longhorn storage. Use for on-prem or self-managed remote clusters.
+---
+
 # DataSurface Remote Cluster Setup Walkthrough
 
 This skill guides you through setting up a DataSurface Yellow environment on a remote Kubernetes cluster accessed via SSH. It uses external PostgreSQL databases (separate hosts for Airflow metadata and merge data) and Longhorn storage.
@@ -612,8 +617,8 @@ Expected tables:
 - `demo_psp_factory_dags`
 - `demo_psp_cqrs_dags`
 - `demo_psp_dc_reconcile_dags`
-- `scd2_airflow_dsg`
-- `scd2_airflow_datatransformer`
+- `scd4_airflow_dsg`
+- `scd4_airflow_datatransformer`
 
 ### 8c. Verify DAGs are registered
 
@@ -629,11 +634,11 @@ Expected DAGs (5 total):
 
 | DAG ID | Description |
 |--------|-------------|
-| `scd2_factory_dag` | Factory DAG for SCD2 pipelines |
+| `scd4_factory_dag` | Factory DAG for SCD4 pipelines |
 | `Demo_PSP_K8sMergeDB_reconcile` | DataContainer reconciliation |
 | `Demo_PSP_default_K8sMergeDB_cqrs` | CQRS DAG |
 | `demo-psp_infrastructure` | Infrastructure management |
-| `scd2_datatransformer_factory` | DataTransformer factory |
+| `scd4_datatransformer_factory` | DataTransformer factory |
 
 ### 8d. Check for import errors
 
@@ -927,7 +932,7 @@ Git-sync will pick up the change within 60 seconds.
 # Drop tables on the merge DB
 PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -d merge_db -c "
   DROP TABLE IF EXISTS demo_psp_factory_dags, demo_psp_cqrs_dags,
-    demo_psp_dc_reconcile_dags, scd2_airflow_dsg, scd2_airflow_datatransformer;
+    demo_psp_dc_reconcile_dags, scd4_airflow_dsg, scd4_airflow_datatransformer;
 "
 
 # Copy updated job YAMLs to remote

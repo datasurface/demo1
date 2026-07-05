@@ -339,7 +339,7 @@ State must be `Ready`.
 
 ### Step 5: Create Azure SQL Database
 
-This Azure SQL Database is used as the **merge engine** (SQL Server). DataSurface's merge jobs connect here to perform SCD2 operations.
+This Azure SQL Database is used as the **merge engine** (SQL Server). DataSurface's merge jobs connect here to perform SCD4 operations.
 
 **Note:** Some Azure regions periodically stop accepting new SQL Database server provisioning. If eastus fails with `RegionDoesNotAllowProvisioning`, try eastus2 or another nearby region. When using a different region than the VNet, you cannot use VNet rules for firewall -- instead use the "Allow Azure services" firewall rule (`0.0.0.0` to `0.0.0.0`) or create a cross-region private endpoint.
 
@@ -1425,11 +1425,11 @@ Expected DAGs (5 total):
 
 | DAG ID | Description |
 |--------|-------------|
-| `scd2_factory_dag` | Factory DAG for SCD2 pipelines |
+| `scd4_factory_dag` | Factory DAG for SCD4 pipelines |
 | `Demo_PSP_K8sMergeDB_reconcile` | DataContainer reconciliation |
 | `Demo_PSP_default_K8sMergeDB_cqrs` | CQRS DAG |
 | `demo-psp_infrastructure` | Infrastructure management |
-| `scd2_datatransformer_factory` | DataTransformer factory |
+| `scd4_datatransformer_factory` | DataTransformer factory |
 
 Check for import errors:
 
@@ -1470,7 +1470,7 @@ Wait 5-10 minutes after deployment, then verify all DAGs are running successfull
 
 ```bash
 # Check recent runs for each DAG
-for dag in demo-psp_infrastructure scd2_factory_dag scd2_datatransformer_factory Demo_PSP_K8sMergeDB_reconcile Demo_PSP_default_K8sMergeDB_cqrs; do
+for dag in demo-psp_infrastructure scd4_factory_dag scd4_datatransformer_factory Demo_PSP_K8sMergeDB_reconcile Demo_PSP_default_K8sMergeDB_cqrs; do
   echo "=== $dag ==="
   kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
     airflow dags list-runs "$dag" -o table 2>&1 | grep -E "success|failed|running|dag_id" | head -6

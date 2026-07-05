@@ -53,6 +53,21 @@ Use the **setup-walkthrough** skill (remote variant) for deploying on a remote K
 
 This covers everything in the local walkthrough plus: CoreDNS configuration, SSH-based access, external database setup, Longhorn storage, and SSH tunnel access to Airflow.
 
+## Working with your model (day-2 operations)
+
+The starter model uses **SCD4 milestoning** (a current-snapshot table plus a separate history table). Once your environment is running, these interactive skills cover the day-to-day loop of changing, transforming, deploying, verifying, and operating it:
+
+| Skill | Use it to |
+| ----- | --------- |
+| `/validate-model-locally` | Lint your model against the installed DataSurface in seconds, **before** you push (fast inner loop). |
+| `/edit-model-fragment` | Check out, edit, and push a model change as a PR. |
+| `/deploy-model-change` | Ship a model change to an already-running environment and confirm it took effect. |
+| `/wire-datatransformer` | Add a DataTransformer — mask PII, run dbt, or derive datasets — and verify its output. |
+| `/verify-data-fidelity` | Prove your data moved faithfully: compare source → merge → CQRS, check SCD4 per-key integrity and hash consistency. |
+| `/check-system-health` | "How's it doing?" — throughput, database, and Airflow health with baselines. |
+| `/upgrade-datasurface-version` | Move to a new DataSurface runtime version (bumps the image and regenerates bootstrap DAGs). |
+| `/troubleshoot-airflow`, `/troubleshoot-k8s-jobs` | Diagnose failed DAGs, stuck tasks, and job errors. |
+
 ## Project Structure
 
 ```text

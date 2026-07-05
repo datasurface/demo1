@@ -2,11 +2,11 @@
 Copyright (c) 2026 DataSurface Inc. All Rights Reserved.
 Proprietary Software - See LICENSE.txt for terms.
 
-This is a starter datasurface repository. It defines a simple Ecosystem using YellowDataPlatform with SCD2 modes. It
+This is a starter datasurface repository. It defines a simple Ecosystem using YellowDataPlatform with SCD4 modes. It
 ingests data from a single source, using a Workspace to produce a masked version of that data and provides consumer Workspaces
 to that data in the primary merge Postgres.
 
-It will generate 1 pipelines and it supports full milestoning (SCD2).
+It will generate 1 pipelines and it supports full milestoning (SCD4: a current-snapshot table plus a separate history table).
 """
 
 from datasurface.dsl import ProductionStatus, \
@@ -60,9 +60,9 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7",
         dataPlatforms=[
             YellowDataPlatform(
-                "SCD2",
-                doc=PlainTextDocumentation("SCD2 Yellow DataPlatform"),
-                milestoneStrategy=DataMilestoningStrategy.SCD2,
+                "SCD4",
+                doc=PlainTextDocumentation("SCD4 Yellow DataPlatform"),
+                milestoneStrategy=DataMilestoningStrategy.SCD4,
                 stagingBatchesToKeep=5
                 )
         ]

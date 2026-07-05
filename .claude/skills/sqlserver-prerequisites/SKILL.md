@@ -41,7 +41,7 @@ Symptoms:
 - `ERROR 1205: Transaction was deadlocked on lock resources`
 - Random job failures under concurrent load
 - Jobs succeed when run one at a time but fail in parallel
-- Deadlocks on `scd2_batch_metrics` or staging tables (`*_s`)
+- Deadlocks on `scd4_batch_metrics` or staging tables (`*_s`)
 
 The deadlocks appear random because they depend on timing — which threads happen to access which rows in which order. They are not transient; they are a fundamental locking conflict.
 

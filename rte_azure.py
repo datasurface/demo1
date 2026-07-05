@@ -66,9 +66,9 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         datasurfaceDockerImage=f"registry.gitlab.com/datasurface-inc/datasurface/datasurface:v{DATASURFACE_VERSION}",
         dataPlatforms=[
             YellowDataPlatform(
-                "SCD2",
-                doc=PlainTextDocumentation("SCD2 Yellow DataPlatform"),
-                milestoneStrategy=DataMilestoningStrategy.SCD2,
+                "SCD4",
+                doc=PlainTextDocumentation("SCD4 Yellow DataPlatform"),
+                milestoneStrategy=DataMilestoningStrategy.SCD4,
                 stagingBatchesToKeep=5
             )
         ]
