@@ -1,6 +1,6 @@
 ---
-name: Setup Kubernetes Registry Secret
-description: Configure Kubernetes to pull DataSurface images from GitLab registry.
+name: setup-k8s-registry-secret
+description: Configure a namespace to pull DataSurface images from the GitLab container registry. Use while setting up or repairing local, AWS, or Azure demo1 image pulls.
 ---
 # Setup Kubernetes Registry Secret
 
@@ -24,20 +24,16 @@ export GITLAB_CUSTOMER_USER="your-deploy-token-username"
 export GITLAB_CUSTOMER_TOKEN="your-deploy-token"
 ```
 
-### 2. Create the Docker Registry Secret
+### 2. Create or rotate the Docker Registry Secret
 
 ```bash
 kubectl create secret docker-registry datasurface-registry \
+  --namespace "$NAMESPACE" \
   --docker-server=registry.gitlab.com \
   --docker-username="$GITLAB_CUSTOMER_USER" \
   --docker-password="$GITLAB_CUSTOMER_TOKEN" \
-  -n $NAMESPACE
-```
-
-Expected output:
-
-```text
-secret/datasurface-registry created
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 ```
 
 ### 3. Attach Secret to Default Service Account
@@ -45,7 +41,7 @@ secret/datasurface-registry created
 This allows all pods in the namespace to use the secret automatically:
 
 ```bash
-kubectl patch serviceaccount default -n $NAMESPACE \
+kubectl patch serviceaccount default -n "$NAMESPACE" \
   -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
 ```
 
@@ -59,10 +55,11 @@ serviceaccount/default patched
 
 ```bash
 # Check secret exists
-kubectl get secret datasurface-registry -n $NAMESPACE
+kubectl get secret datasurface-registry -n "$NAMESPACE"
 
 # Verify service account has imagePullSecrets
-kubectl get sa default -n $NAMESPACE -o yaml | grep -A2 imagePullSecrets
+kubectl get sa default -n "$NAMESPACE" \
+  -o jsonpath='{.imagePullSecrets[*].name}{"\n"}'
 ```
 
 Expected output:
@@ -87,7 +84,7 @@ spec:
     - name: datasurface-registry
   containers:
     - name: datasurface
-      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.1.0
+      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4
 ```
 
 ## Using in Helm Charts
@@ -100,33 +97,14 @@ imagePullSecrets:
 
 image:
   repository: registry.gitlab.com/datasurface-inc/datasurface/datasurface
-  tag: v1.1.0
+  tag: v1.8.4
 ```
 
 ## Updating the Secret
 
-If credentials change, delete and recreate:
-
-```bash
-kubectl delete secret datasurface-registry -n $NAMESPACE
-
-kubectl create secret docker-registry datasurface-registry \
-  --docker-server=registry.gitlab.com \
-  --docker-username="$GITLAB_CUSTOMER_USER" \
-  --docker-password="$GITLAB_CUSTOMER_TOKEN" \
-  -n $NAMESPACE
-```
-
-Or use dry-run with apply:
-
-```bash
-kubectl create secret docker-registry datasurface-registry \
-  --docker-server=registry.gitlab.com \
-  --docker-username="$GITLAB_CUSTOMER_USER" \
-  --docker-password="$GITLAB_CUSTOMER_TOKEN" \
-  -n $NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
+Repeat Step 2. The apply pattern rotates the Secret without a delete window. Restart only pods
+that are currently failing to pull; healthy running containers do not need a registry credential
+until their next image pull.
 
 ## Troubleshooting
 
@@ -136,13 +114,13 @@ If pods show `ImagePullBackOff`:
 
 ```bash
 # Check pod events
-kubectl describe pod <pod-name> -n $NAMESPACE | grep -A10 Events
+kubectl describe pod <pod-name> -n "$NAMESPACE" | sed -n '/Events:/,$p'
 
 # Verify secret exists
-kubectl get secret datasurface-registry -n $NAMESPACE
+kubectl get secret datasurface-registry -n "$NAMESPACE"
 
 # Verify service account configuration
-kubectl get sa default -n $NAMESPACE -o yaml
+kubectl get sa default -n "$NAMESPACE" -o yaml
 ```
 
 ### Secret Not Found in Pod
@@ -160,7 +138,9 @@ spec:
 Test credentials locally first:
 
 ```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
 ```
 
 If local login fails, the credentials are invalid.

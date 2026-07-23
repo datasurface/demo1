@@ -1,6 +1,6 @@
 ---
-name: Wire a DataTransformer
-description: Add a DataTransformer to the demo1 model when the user asks to "add a data transformer", "mask PII", "wire a DT", "add a dbt transformer", "create a masked/derived dataset", or "transform data between datastores". Covers Python and dbt DTs, the built-in tokenizer for masking, output modes, downstream wiring, and verification.
+name: wire-datatransformer
+description: Add and verify a DataTransformer in demo1. Use for PII masking, Python or dbt transforms, derived datasets, output modes, downstream wiring, and SCD4 verification.
 ---
 # Wire a DataTransformer
 
@@ -143,11 +143,18 @@ Workspace(
 
 1. **Lint locally** before pushing — see the `validate-model-locally` skill (or run `python -c "from eco import createEcosystem; createEcosystem()"` / `pytest test_loads.py` as a quick check).
 2. **Push the change** via the `edit-model-fragment` skill — commit to the owning Team's branch to open a PR.
-3. After merge, the infrastructure DAG re-triggers, and `scd4_datatransformer_factory` creates the DT's own DAG (named after the DT workspace). Trigger/wait for it via the same Airflow patterns as `start-initial-ingestion`:
+3. After merge and publication of a new stable model release, trigger
+   `demo-psp_infrastructure`. Its model-merge and factory-creation tasks refresh the dynamic DAG
+   set. Discover the DT's DAG name rather than assuming a fixed factory DAG ID:
    ```bash
-   kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list | grep -i mask
-   kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause <dt-dag-name>
-   kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger <dt-dag-name>
+   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+     airflow dags trigger demo-psp_infrastructure
+   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+     env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
+   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+     airflow dags unpause <dt-dag-name>
+   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+     airflow dags trigger <dt-dag-name>
    ```
 4. **Verify the DT ran and the output landed.** The DT's own raw write schema is `ds_dt_<workspace>_<datatransformer>` (all lowercased), e.g. `ds_dt_maskedstoregenerator_maskedcustomergenerator.dt_maskedcustomers_customers`. The ingested/consumer-visible copy follows demo1's normal SCD4 layout in `ds_dp_scd4`:
    ```sql
@@ -187,7 +194,7 @@ Flavor:            Built-in tokenizer | Custom Python | dbt
 Output Mode:       IUD | SNAPSHOT
 
 Model lint:         ✅ / ❌
-DT DAG created:     ✅ / ❌  (scd4_datatransformer_factory)
+DT DAG created:     ✅ / ❌  (infrastructure factory-creation task)
 DT DAG succeeded:   ✅ / ❌
 Output row count:   ✅ matches source | ⚠️ mismatch (<source_count> vs <output_count>)
 Masking verified:   ✅ PII columns transformed | ⚠️ not checked | ❌ PII columns unchanged

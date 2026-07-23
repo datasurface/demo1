@@ -1,23 +1,16 @@
 # Airflow Helm Values for Azure AKS
 # Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-azure.yaml
-# PLACEHOLDER values are replaced by the setup-walkthrough-azure skill during deployment.
-
-# CRITICAL: Top-level labels block - applies to ALL pods via the Helm chart.
-# The Workload Identity mutating webhook matches on pod labels (not SA labels).
-# Without this, AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_FEDERATED_TOKEN_FILE
-# will NOT be injected into any pods, even with correct SA annotations.
-labels:
-  azure.workload.identity/use: "true"
+# Environment-specific values are replaced by setup-walkthrough-azure during deployment.
 
 executor: CeleryExecutor
 
-# Custom Airflow image with pymssql + Azure Key Vault SDK
-# Required because merge DB is Azure SQL (SQL Server) and DAGs read from Azure Key Vault
+# Custom Airflow image with the database drivers required by this starter.
+# The baseline uses namespace-local Kubernetes Secrets; ESO/Key Vault is optional.
 # Pre-built and hosted on GitLab - pulled with the same datasurface-registry secret
 images:
   airflow:
     repository: registry.gitlab.com/datasurface-inc/datasurface/airflow
-    tag: "3.1.8-azure"
+    tag: "3.3.0-azure-supported-merge-drivers-20260714"
 
 # Registry secret for pulling custom Airflow image from GitLab
 registry:
@@ -28,14 +21,7 @@ postgresql:
   enabled: false
 
 data:
-  metadataConnection:
-    user: PLACEHOLDER_PG_ADMIN_USER
-    pass: PLACEHOLDER_PG_ADMIN_PASSWORD
-    protocol: postgresql
-    host: PLACEHOLDER_PG_FQDN
-    port: 5432
-    db: airflow_db
-    sslmode: require
+  metadataSecretName: airflow-metadata
 
 # Redis for Celery broker
 redis:
@@ -128,28 +114,11 @@ cleanup:
   schedule: "*/30 * * * *"
   args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
 
-# Service account with Workload Identity
+# Airflow job service account. Cloud-vault access belongs to External Secrets
+# Operator's dedicated service account, not to Airflow pods.
 serviceAccount:
   create: true
   name: airflow-worker
-  annotations:
-    azure.workload.identity/client-id: PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID
-  labels:
-    azure.workload.identity/use: "true"
-
-# Azure credentials for DAG secret resolution
-# The infrastructure DAG's AzureKeyVaultSecretManager reads Key Vault at parse time,
-# which means ALL pods (dag-processor, scheduler, worker, triggerer) need these credentials.
-# AZURE_CLIENT_ID MUST be set here as a global env var — the Workload Identity webhook
-# only injects it for pods whose SA has the client-id annotation, but the Helm chart
-# creates separate SAs for each component and only airflow-worker gets the annotation.
-# Without AZURE_CLIENT_ID in the global env, dag-processor and scheduler pods cannot
-# authenticate to Key Vault, causing DAGs to silently fail to serialize.
-env:
-  - name: AZURE_KEY_VAULT_URL
-    value: "PLACEHOLDER_KEY_VAULT_URL"
-  - name: AZURE_CLIENT_ID
-    value: "PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID"
 
 # PgBouncer connection pooler - transaction mode returns connections to the pool
 # after each transaction, preventing stale connection issues after DB restarts
@@ -172,4 +141,4 @@ webserver:
     firstName: Admin
     lastName: User
     email: admin@example.com
-    password: admin
+    password: PLACEHOLDER_AIRFLOW_ADMIN_PASSWORD

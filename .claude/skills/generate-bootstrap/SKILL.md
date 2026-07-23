@@ -1,296 +1,173 @@
 ---
-name: Generate DataSurface Yellow Bootstrap Artifacts
-description: Generate Kubernetes manifests, Airflow DAGs, and initialization jobs for Yellow deployment.
+name: generate-bootstrap
+description: Generate, validate, publish, and deploy current DataSurface Yellow ring-0 bootstrap artifacts for demo1. Use when creating an environment, changing the runtime environment or PSP, or upgrading the DataSurface image.
 ---
-# Generating Yellow Bootstrap Artifacts
 
-Bootstrap artifacts are the Kubernetes manifests and Airflow DAGs needed to deploy and operate a DataSurface Yellow environment.
+# Generate Yellow bootstrap artifacts
 
-## Prerequisites
+Generate ring-0 artifacts with the exact DataSurface image pinned by the selected runtime
+environment. Current images expose the bootstrap CLI at
+`datasurface.entrypoints.platform`; do not use the retired `datasurface.cmd.platform` module.
 
-1. **DataSurface Docker image pulled:**
+## Inputs
 
-```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-```
-
-1. **Model configured** with correct repository settings in `eco.py`:
-
-```python
-GIT_REPO_OWNER: str = "yourorg"
-GIT_REPO_NAME: str = "demo1_actual"
-```
-
-1. **Runtime environment defined** in `rte_demo.py` with proper credentials and database configuration.
-
-## Ring Levels Explained
-
-Yellow uses a "ring" system for staged deployment:
-
-| Ring Level | Purpose | When to Run | Artifacts Generated |
-| ------------ | --------- | ------------- | --------------------- |
-| **0** | Initial bootstrap | Once, before K8s setup | kubernetes-bootstrap.yaml, infrastructure DAG, init job, merge job |
-| **1** | Schema initialization | After K8s bootstrap applied | Creates database schemas, tables, initializes merge DB |
-
-**Ring 0** generates the files you need to set up Kubernetes.
-**Ring 1** runs inside Kubernetes to initialize the database schemas.
-
-## Generating Ring 0 Artifacts (Local)
-
-Run this from your model directory:
+Confirm these values before running commands:
 
 ```bash
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
+export DATASURFACE_VERSION="1.8.4"
+export MODEL_DIR="$(pwd)"
+export PSP_NAME="Demo_PSP"
+export RTE_NAME="demo"       # demo1 keeps this RTE name for local, AWS, and Azure
+export NAMESPACE="demo1"
+export AIRFLOW_DAG_REPO="OWNER/REPOSITORY"
+```
+
+Run from the model repository. The selected RTE must exist in `eco.py`, its PSP must be present,
+and its `datasurfaceDockerImage` must use the same version. In demo1, AWS/Azure selection changes
+the imported `createDemoRTE` implementation; the declared RTE name remains `demo`.
+
+## Generate
+
+Authenticate without placing the token on the command line:
+
+```bash
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}"
+
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
+docker pull --platform linux/amd64 "$IMAGE"
+```
+
+Remove only the selected PSP's old generated directory, then render it again:
+
+```bash
+rm -rf "${MODEL_DIR:?}/generated_output/${PSP_NAME}"
+
+docker run --rm --platform linux/amd64 \
+  -v "$MODEL_DIR":/workspace/model \
   -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
+  "$IMAGE" \
+  python -m datasurface.entrypoints.platform generatePlatformBootstrap \
+    --ringLevel 0 \
+    --model /workspace/model \
+    --output /workspace/model/generated_output \
+    --psp "$PSP_NAME" \
+    --rte-name "$RTE_NAME"
 ```
 
-### Parameters
+Omit `--platform linux/amd64` when the selected image has a native manifest for the host.
 
-| Parameter | Description | Example |
-| ----------- | ------------- | --------- |
-| `--ringLevel` | Bootstrap stage (0 or 1) | `0` |
-| `--model` | Path to model directory (inside container) | `/workspace/model` |
-| `--output` | Output directory for generated files | `/workspace/model/generated_output` |
-| `--psp` | Platform Service Provider name from model | `Demo_PSP` |
-| `--rte-name` | Runtime Environment name from model | `demo` |
+## Verify current output
 
-## Generated Artifacts (Ring 0)
-
-After running Ring 0 generation, you'll have:
+For `Demo_PSP`, the expected ring-0 files are:
 
 ```text
-generated_output/
-└── Demo_PSP/
-    ├── kubernetes-bootstrap.yaml      # PVC, ConfigMap, NetworkPolicy, MCP Server
-    ├── demo_psp_infrastructure_dag.py # Airflow DAG for ongoing operations
-    ├── demo_psp_ring1_init_job.yaml   # K8s Job for Ring 1 initialization
-    ├── demo_psp_model_merge_job.yaml  # K8s Job for model merge operations
-    └── demo_psp_reconcile_views_job.yaml  # K8s Job for view reconciliation
+generated_output/Demo_PSP/
+├── kubernetes-bootstrap.yaml
+├── demo_psp_infrastructure_dag.py
+├── demo_psp_reconcile_views_job.yaml
+└── demo_psp_ring1_init_job.yaml
 ```
 
-### Artifact Descriptions
-
-**kubernetes-bootstrap.yaml** contains:
-
-- `git-cache-pvc` - PersistentVolumeClaim for caching git repository
-- `demo-logging-config` - ConfigMap for logging configuration
-- `demo-network-policy` - NetworkPolicy for pod communication
-- `demo-psp-mcp-server` - Deployment for Model Context Protocol server
-- `demo-psp-mcp` - Service exposing MCP server
-
-**demo_psp_infrastructure_dag.py** - Airflow DAG that:
-
-- Monitors model repository for changes
-- Triggers merge jobs when model updates
-- Manages reconciliation tasks
-
-**demo_psp_ring1_init_job.yaml** - Kubernetes Job that:
-
-- Initializes database schemas
-- Creates required tables in merge database
-- Sets up Ring 1 infrastructure
-
-**demo_psp_model_merge_job.yaml** - Kubernetes Job that:
-
-- Processes model changes
-- Updates pipeline configurations
-- Synchronizes state with merge database
-
-## Deployment Order
-
-After generating Ring 0 artifacts:
+Verify names and syntax:
 
 ```bash
-# 1. Apply Kubernetes bootstrap (creates PVC, MCP server, network policies)
-kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+find "generated_output/$PSP_NAME" -maxdepth 1 -type f -print | sort
+test -f "generated_output/$PSP_NAME/kubernetes-bootstrap.yaml"
+test -f "generated_output/$PSP_NAME/demo_psp_infrastructure_dag.py"
+test -f "generated_output/$PSP_NAME/demo_psp_ring1_init_job.yaml"
+test -f "generated_output/$PSP_NAME/demo_psp_reconcile_views_job.yaml"
+test ! -e "generated_output/$PSP_NAME/demo_psp_model_merge_job.yaml"
 
-# 2. Copy DAG to GitSync repository
-cp generated_output/Demo_PSP/demo_psp_infrastructure_dag.py /path/to/demo1_airflow/dags/
-cd /path/to/demo1_airflow
-git add dags/
-git commit -m "Add infrastructure DAG"
-git push
-
-# 3. Run Ring 1 initialization (creates database schemas)
-kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
-
-# 4. Wait for Ring 1 to complete
-kubectl wait --for=condition=complete job/demo-psp-ring1-init -n $NAMESPACE --timeout=120s
-
-# 5. Run model merge job
-kubectl apply -f generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
+for file in "generated_output/$PSP_NAME"/*.yaml; do
+  kubectl apply --dry-run=client -f "$file" >/dev/null
+done
+python -m py_compile "generated_output/$PSP_NAME"/*_dag.py
 ```
 
-## Regenerating Artifacts
+The standalone model-merge Job is obsolete. Current model merge is the plan/publish sequence
+inside the generated `<psp>_infrastructure` DAG.
 
-If you update your model (eco.py, rte_demo.py), regenerate artifacts:
+When `externalSecretProvider=None`, the generated YAML must not contain `ExternalSecret`,
+`SecretStore`, or `ClusterSecretStore` resources:
 
 ```bash
-# Remove old artifacts
-rm -rf generated_output/
-
-# Regenerate
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
-
-# Reapply to Kubernetes
-kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
-
-# Delete and recreate jobs (jobs are immutable)
-kubectl delete job demo-psp-ring1-init -n $NAMESPACE --ignore-not-found
-kubectl delete job demo-psp-model-merge-job -n $NAMESPACE --ignore-not-found
-kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
-kubectl apply -f generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
+if rg -n 'kind: (ExternalSecret|SecretStore|ClusterSecretStore)' \
+  "generated_output/$PSP_NAME"; then
+  echo "Unexpected ESO resource in direct-secret configuration" >&2
+  exit 1
+fi
 ```
 
-## Using a Newer Image Version
+ESO resources are expected only when a customer deliberately configures an external secret
+provider in the RTE.
 
-To use a different DataSurface version:
+## Publish generated DAGs
+
+Publish every generated `*_dag.py`. Remove previously generated DAG files in the clone first so
+deleted catalog/export DAGs cannot linger:
 
 ```bash
-# Set version
-export DATASURFACE_VERSION="1.2.0"
+export DAG_CLONE
+DAG_CLONE="$(mktemp -d)"
+git clone "https://github.com/${AIRFLOW_DAG_REPO}.git" "$DAG_CLONE"
+mkdir -p "$DAG_CLONE/dags"
+rm -f "$DAG_CLONE"/dags/*_dag.py
+cp "generated_output/$PSP_NAME"/*_dag.py "$DAG_CLONE/dags/"
 
-# Pull new image
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-# Update rte_demo.py to use new image
-# datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.2.0"
-
-# Regenerate artifacts
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
+git -C "$DAG_CLONE" add -A dags
+git -C "$DAG_CLONE" diff --cached --check
+git -C "$DAG_CLONE" commit -m "Refresh generated DataSurface DAGs"
+git -C "$DAG_CLONE" push origin main
 ```
 
-## Troubleshooting
+If the repository is initially empty, create and push its `main` branch before installing
+Airflow so git-sync has a valid ref.
 
-### Model Import Errors
+## Deploy
 
-**Error:**
-
-```text
-ModuleNotFoundError: No module named 'eco'
-ImportError: cannot import name 'Ecosystem' from 'eco'
-```
-
-**Solution:** Ensure you're running from the model directory and the volume mount is correct:
+Apply the bootstrap manifest, then recreate ring 1:
 
 ```bash
-cd /path/to/demo1_actual
-docker run --rm -v "$(pwd)":/workspace/model ...
+kubectl apply -f "generated_output/$PSP_NAME/kubernetes-bootstrap.yaml"
+kubectl rollout status deployment/demo-psp-mcp-server \
+  -n "$NAMESPACE" --timeout=300s
+
+kubectl delete job demo-psp-ring1-init \
+  -n "$NAMESPACE" --ignore-not-found --wait=true
+kubectl apply -f "generated_output/$PSP_NAME/demo_psp_ring1_init_job.yaml"
+kubectl wait --for=condition=complete \
+  job/demo-psp-ring1-init -n "$NAMESPACE" --timeout=300s
+kubectl logs job/demo-psp-ring1-init -n "$NAMESPACE" --tail=80
 ```
 
-### PSP Not Found
-
-**Error:**
-
-```text
-ValueError: PSP 'Demo_PSP' not found in ecosystem
-```
-
-**Solution:** Check the PSP name matches exactly what's defined in your model. Look in `rte_demo.py` for:
-
-```python
-YellowPlatformServiceProvider(
-    "Demo_PSP",
-    ...
-)
-```
-
-### RTE Not Found
-
-**Error:**
-
-```text
-ValueError: RTE 'demo' not found
-```
-
-**Solution:** Check the RTE name matches the runtime environment in your model:
-
-```python
-YellowRunTimeEnvironment(
-    "demo",
-    ...
-)
-```
-
-### Permission Denied on Output
-
-**Error:**
-
-```text
-PermissionError: [Errno 13] Permission denied: '/workspace/model/generated_output'
-```
-
-**Solution:** The Docker container runs as a specific user. Either:
-
-1. Pre-create the output directory: `mkdir -p generated_output`
-2. Or run with user mapping: `docker run --rm -u $(id -u):$(id -g) -v ...`
-
-### NoneType Errors
-
-**Error:**
-
-```text
-AttributeError: 'NoneType' object has no attribute 'name'
-```
-
-**Solution:** Usually indicates a missing or misconfigured credential in the model. Verify all credentials are defined:
-
-```python
-mergeRW_Credential=Credential("postgres-demo-merge", CredentialType.USER_PASSWORD)
-gitPlatformRepoCredential=Credential("git", CredentialType.API_TOKEN)
-```
-
-## Comparing Generated Artifacts
-
-To compare artifacts after regeneration (useful when debugging):
+Wait for git-sync and DAG parsing, then trigger infrastructure/model merge with the Airflow 3
+scheduler:
 
 ```bash
-# Save old artifacts
-cp -r generated_output/Demo_PSP generated_output/Demo_PSP_old
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json
 
-# Regenerate
-docker run --rm ...
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger demo-psp_infrastructure
 
-# Compare
-diff generated_output/Demo_PSP_old/demo_psp_model_merge_job.yaml \
-     generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
-## Validating Generated YAML
+Wait for the new infrastructure DAG run to reach `success`. Do not apply or wait for
+`demo-psp-model-merge-job`.
 
-Before applying to Kubernetes:
+## Failure handling
 
-```bash
-# Dry-run to check for errors
-kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml --dry-run=client
-
-# Validate YAML syntax
-kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml --dry-run=server
-```
+- Import or lint failure: fix the model first; do not deploy partial artifacts.
+- PSP/RTE not found: confirm names in `eco.py`; names are case-sensitive.
+- Old artifact still present: remove only `generated_output/$PSP_NAME`, then regenerate.
+- DAG import error: inspect `airflow dags list-import-errors` before triggering infrastructure.
+- Ring 1 failure: inspect the Job logs and Kubernetes events; do not trigger infrastructure until
+  ring 1 completes.
+- Infrastructure failure: inspect the Airflow task logs. Plan, optional ESO reconcile, and publish
+  are tasks in the DAG, not separate bootstrap Jobs.

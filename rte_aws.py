@@ -20,18 +20,18 @@ from datasurface.repos import VersionPatternReleaseSelector, GitHubRepository, R
 
 # AWS configuration - replaced by setup-walkthrough-aws skill
 KUB_NAME_SPACE: str = "PLACEHOLDER_NAMESPACE"
-MERGE_HOST: str = "PLACEHOLDER_AURORA_ENDPOINT"
+MERGE_HOST: str = "PLACEHOLDER_POSTGRES_ENDPOINT"
 MERGE_PORT: int = 5432
 MERGE_DBNAME: str = "merge_db"
-AIRFLOW_HOST: str = "PLACEHOLDER_AURORA_ENDPOINT"
+AIRFLOW_HOST: str = "PLACEHOLDER_POSTGRES_ENDPOINT"
 AIRFLOW_PORT: int = 5432
 AWS_ACCOUNT_ID: str = "PLACEHOLDER_AWS_ACCOUNT_ID"
-DATASURFACE_VERSION: str = "1.3.7"
+DATASURFACE_VERSION: str = "1.8.4"
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:
-    # Aurora merge database
+    # RDS PostgreSQL merge database
     k8s_merge_datacontainer: PostgresDatabase = PostgresDatabase(
         "K8sMergeDB",
         hostPort=HostPortPair(MERGE_HOST, MERGE_PORT),
@@ -52,7 +52,10 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         git_cache_config=git_config,
         afHostPortPair=HostPortPair(AIRFLOW_HOST, AIRFLOW_PORT),
         airflowServiceAccount=AIRFLOW_SERVICE_ACCOUNT,
-        aws_account_id=AWS_ACCOUNT_ID
+        aws_account_id=AWS_ACCOUNT_ID,
+        # The starter uses administrator-managed namespace-local Kubernetes
+        # Secrets. Customers can opt into "aws" or "vault" ESO integration.
+        externalSecretProvider=None
     )
 
     psp: YellowPlatformServiceProvider = YellowPlatformServiceProvider(

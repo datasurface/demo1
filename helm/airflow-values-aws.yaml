@@ -1,6 +1,6 @@
 # Airflow Helm Values for AWS EKS
 # Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-aws.yaml
-# PLACEHOLDER values are replaced by the setup-walkthrough-aws skill during deployment.
+# Environment-specific values are replaced by setup-walkthrough-aws during deployment.
 
 executor: CeleryExecutor
 
@@ -8,25 +8,18 @@ executor: CeleryExecutor
 images:
   airflow:
     repository: registry.gitlab.com/datasurface-inc/datasurface/airflow
-    tag: "3.1.8-azure"
+    tag: "3.3.0-azure-supported-merge-drivers-20260714"
 
 # Registry secret for pulling custom Airflow image from GitLab
 registry:
   secretName: datasurface-registry
 
-# External Aurora PostgreSQL
+# External RDS PostgreSQL
 postgresql:
   enabled: false
 
 data:
-  metadataConnection:
-    user: postgres
-    pass: PLACEHOLDER_DB_PASSWORD
-    protocol: postgresql
-    host: PLACEHOLDER_AURORA_ENDPOINT
-    port: 5432
-    db: airflow_db
-    sslmode: require
+  metadataSecretName: airflow-metadata
 
 # Redis for Celery broker
 redis:
@@ -119,33 +112,11 @@ cleanup:
   schedule: "*/30 * * * *"
   args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
 
-# Service account with IRSA annotation
+# Airflow job service account. Cloud-vault access belongs to External Secrets
+# Operator's dedicated service account, not to Airflow pods.
 serviceAccount:
   create: true
   name: airflow-worker
-  annotations:
-    eks.amazonaws.com/role-arn: PLACEHOLDER_AIRFLOW_ROLE_ARN
-
-# Secrets Store CSI volume for Airflow DB connection (mounted from AWS Secrets Manager)
-extraVolumes:
-  - name: secrets-store
-    csi:
-      driver: secrets-store.csi.k8s.io
-      readOnly: true
-      volumeAttributes:
-        secretProviderClass: airflow-secrets
-
-extraVolumeMounts:
-  - name: secrets-store
-    mountPath: /mnt/secrets
-    readOnly: true
-
-# AWS region for boto3 (needed by infrastructure DAG's AwsSecretManager at parse time)
-env:
-  - name: AWS_DEFAULT_REGION
-    value: "PLACEHOLDER_AWS_REGION"
-  - name: AWS_REGION
-    value: "PLACEHOLDER_AWS_REGION"
 
 # PgBouncer connection pooler - transaction mode returns connections to the pool
 # after each transaction, preventing stale connection issues after DB restarts
@@ -162,5 +133,9 @@ pgbouncer:
 webserver:
   defaultUser:
     enabled: true
+    role: Admin
     username: admin
-    password: admin
+    firstName: Admin
+    lastName: User
+    email: admin@example.com
+    password: PLACEHOLDER_AIRFLOW_ADMIN_PASSWORD

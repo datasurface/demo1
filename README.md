@@ -19,7 +19,7 @@ export GITHUB_USERNAME="your-github-username"
 export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.1.0"
+export DATASURFACE_VERSION="1.8.4"
 ```
 
 ## Setup
@@ -31,7 +31,9 @@ git clone https://github.com/datasurface/demo1.git
 cd demo1
 ```
 
-Then follow one of the guided walkthroughs below using [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview). Each walkthrough is an interactive skill that walks you through the full setup process step-by-step, with verification at each stage and built-in troubleshooting.
+Then follow the guided walkthrough for the target environment. Each walkthrough verifies the
+current Airflow 3.3/SCD4 bootstrap sequence and uses administrator-managed Kubernetes Secrets by
+default.
 
 ### Local Docker Desktop
 
@@ -51,7 +53,20 @@ Use the **setup-walkthrough** skill (remote variant) for deploying on a remote K
 /remote-setup-walkthrough
 ```
 
-This covers everything in the local walkthrough plus: CoreDNS configuration, SSH-based access, external database setup, Longhorn storage, and SSH tunnel access to Airflow.
+This covers everything in the local walkthrough plus SSH-based access, external database/private
+DNS verification, RWX storage such as Longhorn, and SSH tunnel access to Airflow.
+
+### AWS EKS
+
+Use `/setup-walkthrough-aws` for EKS with RDS PostgreSQL and EFS.
+
+### Azure AKS
+
+Use `/setup-walkthrough-azure` for AKS with PostgreSQL Flexible Server, Azure SQL, and Azure Files
+NFS.
+
+The AWS and Azure starters set `externalSecretProvider=None`. Customers can opt into External
+Secrets Operator later; it is not required for the baseline setup.
 
 ## Working with your model (day-2 operations)
 
@@ -81,7 +96,6 @@ The starter model uses **SCD4 milestoning** (a current-snapshot table plus a sep
 │       ├── kubernetes-bootstrap.yaml
 │       ├── demo_psp_infrastructure_dag.py
 │       ├── demo_psp_ring1_init_job.yaml
-│       ├── demo_psp_model_merge_job.yaml
 │       └── demo_psp_reconcile_views_job.yaml
 ├── eco.py                   # Ecosystem definition
 ├── rte_demo.py              # Runtime environment configuration
@@ -90,11 +104,13 @@ The starter model uses **SCD4 milestoning** (a current-snapshot table plus a sep
 
 ## Secrets Reference
 
-For detailed information on how Yellow converts model credential names to Kubernetes secrets and the expected environment variable format, see the [credential creation guide](.claude/skills/create-k8-credential/SKILLS.md).
+For detailed information on credential-name normalization, canonical Secret keys, direct
+Kubernetes Secrets, and optional ESO integration, see the
+[credential creation guide](.claude/skills/create-k8-credential/SKILL.md).
 
 | Secret Name | Keys | Purpose |
 | ------------- | ------ | --------- |
-| `postgres` | `USER`, `PASSWORD` | Airflow metadata database |
+| `airflow-metadata` | `connection` | Airflow metadata SQLAlchemy URI |
 | `postgres-demo-merge` | `USER`, `PASSWORD` | DataSurface merge database |
 | `git` | `TOKEN` | Model repository access |
 | `git-dags` | `GITSYNC_USERNAME`, `GITSYNC_PASSWORD` | Airflow DAG sync |

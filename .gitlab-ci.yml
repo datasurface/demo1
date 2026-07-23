@@ -15,19 +15,17 @@ datasurface-mr-validator:
     DOCKER_TLS_CERTDIR: ""
     GIT_STRATEGY: none
     GITLAB_CLONE_HOST: gitlab.local
-    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7
-    BASE_REPOSITORY: http://gitlab.local/$CI_PROJECT_PATH
+    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4
     HEAD_REPOSITORY: http://gitlab.local/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
     HEAD_BRANCH: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
     GITLAB_URL: http://gitlab.local
-    GITHUB_TOKEN: $CI_JOB_TOKEN
   before_script:
     - mkdir -p /tmp/main /tmp/mr
     - git clone --depth 1 --branch main "http://oauth2:${GITLAB_REPO_TOKEN}@${GITLAB_CLONE_HOST}/${CI_PROJECT_PATH}.git" /tmp/main
     - git clone --depth 1 --branch "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "http://oauth2:${GITLAB_REPO_TOKEN}@${GITLAB_CLONE_HOST}/${CI_MERGE_REQUEST_SOURCE_PROJECT_PATH}.git" /tmp/mr
     - test -f /tmp/main/eco.py
     - test -f /tmp/mr/eco.py
-    - echo "$GITLAB_ACCESS_TOKEN" | docker login registry.gitlab.com -u "$GITLAB_USERNAME" --password-stdin
+    - printf '%s' "$GITLAB_ACCESS_TOKEN" | docker login registry.gitlab.com --username "$GITLAB_USERNAME" --password-stdin
   script:
     - |
       ALLOW_BREAKS=""
@@ -35,13 +33,11 @@ datasurface-mr-validator:
         ALLOW_BREAKS="--allow-breaking-changes"
       fi
       CID=$(docker create \
-        -e GITHUB_TOKEN="$GITHUB_TOKEN" \
-        -e BASE_REPOSITORY="$BASE_REPOSITORY" \
         -e HEAD_REPOSITORY="$HEAD_REPOSITORY" \
         -e HEAD_BRANCH="$HEAD_BRANCH" \
         -e GITLAB_URL="$GITLAB_URL" \
         "$DATASURFACE_IMAGE" \
-        python -m datasurface.handler.action /workspace/main /workspace/mr --repo-type gitlab $ALLOW_BREAKS )
+        python -m datasurface.entrypoints.action /workspace/main /workspace/mr --repo-type gitlab $ALLOW_BREAKS )
       docker cp /tmp/main/. "$CID":/workspace/main
       docker cp /tmp/mr/. "$CID":/workspace/mr
       docker start -a "$CID"

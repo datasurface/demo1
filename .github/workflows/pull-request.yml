@@ -4,6 +4,10 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled]
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   datasurface-pr-validator:
     name: DataSurface PR Validator
@@ -18,12 +22,14 @@ jobs:
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.sha }}
         path: pr
+        persist-credentials: false
 
     - name: Checkout main branch code
       uses: actions/checkout@v4
       with:
         ref: 'main'
         path: main
+        persist-credentials: false
 
     - name: Login to GitLab Container Registry
       uses: docker/login-action@v3
@@ -46,9 +52,7 @@ jobs:
         docker run --rm \
           -v ${{ github.workspace }}/main:/workspace/main \
           -v ${{ github.workspace }}/pr:/workspace/pr \
-          -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-          -e BASE_REPOSITORY="${{ github.repository }}" \
           -e HEAD_REPOSITORY="${{ github.event.pull_request.head.repo.full_name }}" \
           -e HEAD_BRANCH="${{ github.event.pull_request.head.ref }}" \
-          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7 \
-          python -m datasurface.handler.action /workspace/main /workspace/pr  ${{ steps.check_label.outputs.ALLOW_BREAKS }}
+          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4 \
+          python -m datasurface.entrypoints.action /workspace/main /workspace/pr ${{ steps.check_label.outputs.ALLOW_BREAKS }}

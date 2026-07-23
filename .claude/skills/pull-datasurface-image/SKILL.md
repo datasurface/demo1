@@ -1,6 +1,6 @@
 ---
-name: Pull DataSurface Docker Image
-description: Pull DataSurface Docker images from GitLab registry to local machine.
+name: pull-datasurface-image
+description: Authenticate to the GitLab container registry and pull a pinned DataSurface image. Use before local validation, bootstrap generation, or an image upgrade.
 ---
 # Pull DataSurface Docker Image
 
@@ -27,13 +27,15 @@ You need GitLab registry credentials:
 ```bash
 export GITLAB_CUSTOMER_USER="your-deploy-token-username"
 export GITLAB_CUSTOMER_TOKEN="your-deploy-token"
-export DATASURFACE_VERSION="1.1.0"
+export DATASURFACE_VERSION="1.8.4"
 ```
 
 ### 2. Login to GitLab Registry
 
 ```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
 ```
 
 Expected output:
@@ -47,13 +49,13 @@ Login Succeeded
 **Core image:**
 
 ```bash
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
 ```
 
 **With dbt support:**
 
 ```bash
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface-dbt:v${DATASURFACE_VERSION}
+docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/datasurface-dbt:v${DATASURFACE_VERSION}
 ```
 
 ### 4. Verify the Image
@@ -65,14 +67,17 @@ docker images | grep datasurface
 Expected output:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.1.0   abc123def456   2 days ago   1.2GB
+registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.8.4   abc123def456   2 days ago   1.2GB
 ```
 
 ## Quick One-Liner
 
 ```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN" && \
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
+docker pull --platform linux/amd64 \
+  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
 ```
 
 ## Troubleshooting
@@ -85,10 +90,8 @@ Error response from daemon: Get "https://registry.gitlab.com/v2/": denied: acces
 
 **Solution:** Verify credentials are correct:
 
-```bash
-echo "User: $GITLAB_CUSTOMER_USER"
-echo "Token length: ${#GITLAB_CUSTOMER_TOKEN}"
-```
+Re-run login with `--password-stdin`. If it still fails, confirm the deploy token is active and has
+container-registry read access without printing any part of the token.
 
 ### Image Not Found
 
@@ -99,8 +102,8 @@ Error response from daemon: manifest for ... not found
 **Solution:** Check available versions or verify the version number:
 
 ```bash
-# Try latest stable version
-export DATASURFACE_VERSION="1.1.0"
+# Use the repository's tested version
+export DATASURFACE_VERSION="1.8.4"
 ```
 
 ### Pulling Latest Version
@@ -108,10 +111,6 @@ export DATASURFACE_VERSION="1.1.0"
 To get the most recent image after a fix:
 
 ```bash
-# Force re-pull even if tag exists locally
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-# Or remove and re-pull
-docker rmi registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+# Docker checks the registry and updates the local tag when needed.
+docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
 ```

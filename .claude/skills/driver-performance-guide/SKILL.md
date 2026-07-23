@@ -1,6 +1,6 @@
 ---
-name: Driver Performance Guide
-description: Database driver selection and bulk insert optimization for DataSurface. Covers psycopg2 vs psycopg3, pyodbc fast_executemany, SQLAlchemy bypasses, and the execute_fast_insert pattern. Includes measured benchmarks.
+name: driver-performance-guide
+description: Select and tune database drivers for DataSurface bulk inserts. Use when investigating PostgreSQL, SQL Server, or MySQL throughput and when building the custom Airflow worker image.
 ---
 # Driver Performance Guide
 
@@ -46,7 +46,7 @@ psycopg[binary]==3.2.9   # NOT psycopg2-binary
 psycopg3 must be available in the Airflow worker image because DataSurface code is imported at DAG parse time. If using the community Airflow Helm chart, build a custom image:
 
 ```dockerfile
-FROM apache/airflow:3.1.8
+FROM apache/airflow:3.3.0
 RUN pip install psycopg[binary]==3.2.9
 ```
 

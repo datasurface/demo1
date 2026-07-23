@@ -1,337 +1,205 @@
 ---
-name: Create a DataSurface Yellow Kubernetes Credential
-description: Creates a Kubernetes credential for DataSurface Yellow environment.
+name: create-k8-credential
+description: Create, rotate, and verify DataSurface Yellow runtime credentials. Use for administrator-managed Kubernetes Secrets on local, AWS, or Azure deployments, or for an explicitly requested External Secrets Operator integration.
 ---
-# K8 secret naming rules
 
-Yellow encodes the model credential name to be compatible with Kubernetes secret naming rules.
+# Create a DataSurface Yellow credential
 
-## Overview
+DataSurface model code names and types credentials; it never contains their values. Yellow
+workloads consume namespace-local Kubernetes Secrets. The `demo1` local, AWS, and Azure starter
+RTEs set `externalSecretProvider=None`, so an administrator creates those Secrets directly.
+Customers can opt into External Secrets Operator (ESO); when enabled, AWS Secrets Manager, Azure
+Key Vault, or Vault becomes the source of truth and ESO creates the same Kubernetes Secret shape.
 
-Yellow uses a `KubernetesEnvVarsCredentialStore` to manage credentials. This store retrieves credentials from Kubernetes secrets that are injected into pods as environment variables. Understanding how to properly create and name these secrets is essential for Yellow to function correctly.
+Never print, decode, commit, or put credential values directly in a manifest. Verification should
+inspect names, key names, ownership, and Ready conditions only.
 
-## How Yellow Retrieves Credentials
+## 1. Resolve the required Secret
 
-When a Yellow job runs in Kubernetes, it needs credentials for:
-
-- **Merge database** access (read/write)
-- **Git repository** access (for model retrieval)
-- **Source databases** (for ingestion)
-- **CQRS target databases** (for data replication)
-- **DataTransformer execution** credentials
-
-Yellow converts credential names to Kubernetes-compatible names using a specific convention, then looks for environment variables with standard suffixes based on the credential type.
-
-## Naming Convention
-
-Yellow uses `K8sUtils.to_k8s_name()` to convert credential names to Kubernetes-compatible names:
-
-1. Convert to **lowercase**
-2. Replace **underscores** (`_`) with **hyphens** (`-`)
-3. Replace **spaces** with **hyphens** (`-`)
-4. Remove any non-alphanumeric characters (except hyphens)
-5. Collapse multiple consecutive hyphens into one
-6. Strip leading/trailing hyphens
-
-### Examples
-
-| Model Credential Name | K8s Secret Name |
-| ----------------------- | ----------------- |
-| `postgres` | `postgres` |
-| `git` | `git` |
-| `My_Database_Cred` | `my-database-cred` |
-| `SQL Server` | `sql-server` |
-| `AWS_S3_Access` | `aws-s3-access` |
-
-## Supported Credential Types
-
-Yellow supports four credential types, each with specific environment variable suffixes:
-
-| Credential Type | Description | Environment Variables |
-| ----------------- | ------------- | ---------------------- |
-| `USER_PASSWORD` | Username and password | `{name}_USER`, `{name}_PASSWORD` |
-| `API_TOKEN` | Single token/key | `{name}_TOKEN` |
-| `CLIENT_CERT_WITH_KEY` | Certificate with private key | `{name}_USER`, `{name}_PRIVATE_KEY`, `{name}_PASSPHRASE` |
-| `API_KEY_PAIR` | Public/private key pair | `{name}_PUB`, `{name}_PRV`, `{name}_PWD` |
-
-**Important:** The environment variable names use the K8s-converted secret name as a prefix (e.g., `postgres-demo_USER` for a credential named `postgres-demo`).
-
-## Creating Kubernetes Secrets
-
-### USER_PASSWORD Credentials
-
-Used for database connections (PostgreSQL, SQL Server, MySQL, etc.).
-
-**Model Definition:**
+Start from the model declaration:
 
 ```python
 from datasurface.security import Credential, CredentialType
 
-db_cred = Credential("postgres-demo", CredentialType.USER_PASSWORD)
+merge_credential = Credential("postgres-demo-merge", CredentialType.USER_PASSWORD)
 ```
 
-**Create the Secret:**
+Yellow normalizes the model name to an RFC 1123 Kubernetes Secret name:
+
+1. lowercase;
+2. `_` and spaces become `-`;
+3. other characters are removed;
+4. repeated and edge hyphens are removed.
+
+Examples:
+
+| Model name | Kubernetes Secret |
+|---|---|
+| `postgres-demo-merge` | `postgres-demo-merge` |
+| `Source_DB` | `source-db` |
+| `Snowflake Prod` | `snowflake-prod` |
+
+Distinct model names must not normalize to the same Secret name. Current model lint and ESO
+reconciliation reject collisions.
+
+## 2. Use canonical Secret keys
+
+| CredentialType | Required keys | Optional keys |
+|---|---|---|
+| `USER_PASSWORD` | `USER`, `PASSWORD` | — |
+| `API_TOKEN` | `TOKEN` | — |
+| `API_KEY_PAIR` | `API_KEY`, `API_SECRET` | — |
+| `PRIVATE_KEY_AUTH` | `USER`, `PRIVATE_KEY` | `PASSPHRASE` |
+| `MTLS_CERT_WITH_KEY` | `PUBLIC_CERT`, `PRIVATE_KEY` | `PASSPHRASE` |
+| `CA_CERT_BUNDLE` | `CA_CERT` | — |
+| `PUBLIC_KEY` | `PUBLIC_KEY` | — |
+| `PRIVATE_KEY` | `PRIVATE_KEY` | — |
+
+`FILE_TOKEN` is supplied by the runtime as a mounted file and is intentionally not materialized
+by Yellow's Kubernetes environment-variable credential store or by ESO.
+
+Old key sets such as `PUB`/`PRV`/`PWD`, `CLIENT_CERT_WITH_KEY`, or lowercase-only `token` are stale.
+Use the canonical keys above. ESO accepts lowercase aliases from a remote JSON object for required
+fields, but writes canonical uppercase keys to the Kubernetes Secret; new secrets should use the
+canonical form directly.
+
+## 3A. Local Kubernetes: create the Secret directly
+
+Use environment variables or protected temporary files so literal values do not appear in the
+command text. This idempotent pattern updates an existing Secret:
 
 ```bash
-# Model name: "postgres-demo" → K8s secret: "postgres-demo" (no conversion needed)
-kubectl create secret generic postgres-demo \
-  --from-literal=USER=myuser \
-  --from-literal=PASSWORD=mypassword \
-  -n <namespace>
+NAMESPACE=demo1
+CREDENTIAL_NAME=postgres-demo-merge
+
+kubectl create secret generic "$CREDENTIAL_NAME" \
+  --namespace "$NAMESPACE" \
+  --from-literal=USER="$DB_USER" \
+  --from-literal=PASSWORD="$DB_PASSWORD" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 ```
 
-**Environment Variables Injected:**
-
-- `postgres-demo_USER=myuser`
-- `postgres-demo_PASSWORD=mypassword`
-
-**More Examples:**
-
-```python
-# Model: Credential("sqlserver", CredentialType.USER_PASSWORD)
-# Model: Credential("Mask_DT_Cred", CredentialType.USER_PASSWORD)
-```
+API token:
 
 ```bash
-# Model name: "sqlserver" → K8s secret: "sqlserver"
-kubectl create secret generic sqlserver \
-  --from-literal=USER=sa \
-  --from-literal=PASSWORD='YourStr0ngP@ssword' \
-  -n <namespace>
-
-# Model name: "Mask_DT_Cred" → K8s secret: "mask-dt-cred"
-kubectl create secret generic mask-dt-cred \
-  --from-literal=USER=dt_user \
-  --from-literal=PASSWORD=dt_password \
-  -n <namespace>
-```
-
-### API_TOKEN Credentials
-
-Used for Git repository access, API services, and Kafka authentication.
-
-**Model Definition:**
-
-```python
-git_cred = Credential("git", CredentialType.API_TOKEN)
-```
-
-**Create the Secret:**
-
-```bash
-# Model name: "git" → K8s secret: "git" (no conversion needed)
 kubectl create secret generic git \
-  --from-literal=TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx \
-  -n <namespace>
+  --namespace "$NAMESPACE" \
+  --from-literal=TOKEN="$GITHUB_TOKEN" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 ```
 
-**Environment Variables Injected:**
-
-- `git_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx`
-
-**More Examples:**
-
-```python
-# Model: Credential("slack", CredentialType.API_TOKEN)
-# Model: Credential("connect", CredentialType.API_TOKEN)
-```
+PEM material should come from a file:
 
 ```bash
-# Model name: "slack" → K8s secret: "slack"
-kubectl create secret generic slack \
-  --from-literal=TOKEN=xoxb-your-slack-token \
-  -n <namespace>
-
-# Model name: "connect" → K8s secret: "connect"
-kubectl create secret generic connect \
-  --from-literal=TOKEN=your-kafka-token \
-  -n <namespace>
-```
-
-### CLIENT_CERT_WITH_KEY Credentials
-
-Used for key-pair authentication (e.g., Snowflake with RSA keys).
-
-**Model Definition:**
-
-```python
-snowflake_cred = Credential("Snowflake_Prod", CredentialType.CLIENT_CERT_WITH_KEY)
-```
-
-**Create the Secret:**
-
-```bash
-# Model name: "Snowflake_Prod" → K8s secret: "snowflake-prod"
 kubectl create secret generic snowflake-prod \
-  --from-literal=USER=snowflake_user \
-  --from-literal=PRIVATE_KEY="$(cat /path/to/private_key.pem)" \
-  --from-literal=PASSPHRASE=optional_key_passphrase \
-  -n <namespace>
+  --namespace "$NAMESPACE" \
+  --from-literal=USER="$SNOWFLAKE_USER" \
+  --from-file=PRIVATE_KEY=/secure/path/rsa_key.p8 \
+  --from-literal=PASSPHRASE="$SNOWFLAKE_PASSPHRASE" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 ```
 
-**Environment Variables Injected:**
+Do not use `stringData` or base64 text checked into Git. A Kubernetes Secret is not encrypted merely
+because its `data` fields are base64 encoded.
 
-- `snowflake-prod_USER=snowflake_user`
-- `snowflake-prod_PRIVATE_KEY=<contents of private key>`
-- `snowflake-prod_PASSPHRASE=optional_key_passphrase`
+## 3B. Optional AWS ESO: write the remote JSON object
 
-**Note:** The passphrase can be empty for unencrypted private keys.
+When a customer explicitly sets `externalSecretProvider="aws"`, DataSurface expects one JSON object
+per model credential at:
 
-### API_KEY_PAIR Credentials
-
-Used for services requiring both public and private keys (e.g., AWS-style credentials).
-
-**Model Definition:**
-
-```python
-aws_cred = Credential("AWS_S3_Access", CredentialType.API_KEY_PAIR)
+```text
+datasurface/<normalized-namespace>/<normalized-ecosystem>/<normalized-credential>
 ```
 
-**Create the Secret:**
+For namespace `demo1-aws`, ecosystem `Demo`, and credential `postgres-demo-merge`:
 
 ```bash
-# Model name: "AWS_S3_Access" → K8s secret: "aws-s3-access"
-kubectl create secret generic aws-s3-access \
-  --from-literal=PUB=AKIAIOSFODNN7EXAMPLE \
-  --from-literal=PRV=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-  --from-literal=PWD= \
-  -n <namespace>
+REMOTE_KEY="datasurface/demo1-aws/demo/postgres-demo-merge"
+SECRET_JSON=$(jq -cn --arg user "$DB_USER" --arg password "$DB_PASSWORD" \
+  '{USER:$user,PASSWORD:$password}')
+
+if aws secretsmanager describe-secret --secret-id "$REMOTE_KEY" \
+     --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws secretsmanager put-secret-value --secret-id "$REMOTE_KEY" \
+    --secret-string "$SECRET_JSON" --region "$AWS_REGION" >/dev/null
+else
+  aws secretsmanager create-secret --name "$REMOTE_KEY" \
+    --secret-string "$SECRET_JSON" --region "$AWS_REGION" >/dev/null
+fi
+unset SECRET_JSON
 ```
 
-**Environment Variables Injected:**
+The namespace must contain a Ready `SecretStore` named `datasurface-runtime-secrets`. Generated
+bootstrap/model-merge resources own the `ExternalSecret`; do not hand-create a competing
+`ExternalSecret` with the same name.
 
-- `aws-s3-access_PUB=AKIAIOSFODNN7EXAMPLE`
-- `aws-s3-access_PRV=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
-- `aws-s3-access_PWD=`
+## 3C. Optional Azure ESO: write the remote JSON object
 
-## Complete Example
+When a customer explicitly sets `externalSecretProvider="azure"`, Azure Key Vault does not allow
+`/` in secret names, so DataSurface uses:
 
-Here's a complete example setting up credentials for a typical Yellow deployment.
-
-**Model Definitions:**
-
-```python
-from datasurface.security import Credential, CredentialType
-
-# These credentials would be defined in your ecosystem model
-postgres_cred = Credential("postgres", CredentialType.USER_PASSWORD)
-git_cred = Credential("git", CredentialType.API_TOKEN)
-source_db_cred = Credential("Source_DB", CredentialType.USER_PASSWORD)
-cqrs_cred = Credential("CQRS_Postgres", CredentialType.USER_PASSWORD)
-dt_cred = Credential("My_DataTransformer", CredentialType.USER_PASSWORD)
-snowflake_cred = Credential("Snowflake_Target", CredentialType.CLIENT_CERT_WITH_KEY)
+```text
+datasurface--<normalized-namespace>--<normalized-ecosystem>--<normalized-credential>--credentials
 ```
 
-**Create Kubernetes Secrets:**
+Example:
 
 ```bash
-NAMESPACE=yp-airflow3
+REMOTE_KEY="datasurface--demo1-azure--demo--sqlserver-demo-merge--credentials"
+SECRET_JSON=$(jq -cn --arg user "$DB_USER" --arg password "$DB_PASSWORD" \
+  '{USER:$user,PASSWORD:$password}')
 
-# Model: "postgres" → K8s: "postgres"
-kubectl create secret generic postgres \
-  --from-literal=USER=postgres \
-  --from-literal=PASSWORD=your_merge_db_password \
-  -n $NAMESPACE
-
-# Model: "git" → K8s: "git"
-kubectl create secret generic git \
-  --from-literal=TOKEN=ghp_your_github_personal_access_token \
-  -n $NAMESPACE
-
-# Model: "Source_DB" → K8s: "source-db"
-kubectl create secret generic source-db \
-  --from-literal=USER=reader \
-  --from-literal=PASSWORD=reader_password \
-  -n $NAMESPACE
-
-# Model: "CQRS_Postgres" → K8s: "cqrs-postgres"
-kubectl create secret generic cqrs-postgres \
-  --from-literal=USER=cqrs_writer \
-  --from-literal=PASSWORD=cqrs_password \
-  -n $NAMESPACE
-
-# Model: "My_DataTransformer" → K8s: "my-datatransformer"
-kubectl create secret generic my-datatransformer \
-  --from-literal=USER=dt_user \
-  --from-literal=PASSWORD=dt_password \
-  -n $NAMESPACE
-
-# Model: "Snowflake_Target" → K8s: "snowflake-target"
-kubectl create secret generic snowflake-target \
-  --from-literal=USER=SNOWFLAKE_USER \
-  --from-literal=PRIVATE_KEY="$(cat ~/.ssh/snowflake_key.pem)" \
-  --from-literal=PASSPHRASE=my_key_passphrase \
-  -n $NAMESPACE
+az keyvault secret set \
+  --vault-name "$KEY_VAULT_NAME" \
+  --name "$REMOTE_KEY" \
+  --value "$SECRET_JSON" \
+  --output none
+unset SECRET_JSON
 ```
 
-## Updating Secrets
+The namespace must contain a Ready `SecretStore` named `datasurface-runtime-secrets` configured for
+Azure Workload Identity. Airflow pods do not need direct Key Vault access.
 
-To update an existing secret without deleting it:
+## 4. Reconcile and verify without exposing values
+
+With ESO enabled, bootstrap credentials such as Git and merge database credentials are emitted as
+`ExternalSecret` resources in `kubernetes-bootstrap.yaml`. Credentials discovered from the live
+model are reconciled by the generated infrastructure DAG's plan → ESO reconcile → publish
+sequence. With `externalSecretProvider=None`, there are no generated `ExternalSecret` resources;
+create and rotate the namespace-local Secrets directly.
 
 ```bash
-kubectl create secret generic postgres \
-  --from-literal=USER=postgres \
-  --from-literal=PASSWORD=new_password \
-  -n $NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
+kubectl get secretstore datasurface-runtime-secrets -n "$NAMESPACE"
+kubectl get externalsecrets -n "$NAMESPACE"
+kubectl wait --for=condition=Ready \
+  externalsecret/"$CREDENTIAL_NAME" -n "$NAMESPACE" --timeout=300s
+
+# Show only key names, never values.
+kubectl get secret "$CREDENTIAL_NAME" -n "$NAMESPACE" \
+  -o go-template='{{range $key, $_ := .data}}{{printf "%s\n" $key}}{{end}}'
 ```
 
-## Verifying Secrets
-
-Check that secrets exist and have the expected keys:
+For local direct Secrets, omit the `ExternalSecret` checks:
 
 ```bash
-# List secrets
-kubectl get secrets -n $NAMESPACE
-
-# View secret keys (not values)
-kubectl describe secret postgres -n $NAMESPACE
-
-# Decode a secret value (base64)
-kubectl get secret postgres -n $NAMESPACE -o jsonpath='{.data.USER}' | base64 -d
+kubectl get secret "$CREDENTIAL_NAME" -n "$NAMESPACE"
+kubectl describe secret "$CREDENTIAL_NAME" -n "$NAMESPACE"
 ```
+
+After rotation, ESO refreshes the target Secret. Restart or rerun only the workloads that read the
+credential at process start; do not restart healthy unrelated pipelines.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Credential not found**: Check that the secret name matches the K8s-converted credential name (lowercase, underscores to hyphens).
-
-2. **Wrong key names**: Ensure you use the correct suffixes (`USER`, `PASSWORD`, `TOKEN`, etc.) - they are case-sensitive.
-
-3. **Namespace mismatch**: Secrets must be in the same namespace as the Yellow pods.
-
-4. **Special characters in passwords**: Use single quotes around values with special characters:
-
-   ```bash
-   kubectl create secret generic db \
-     --from-literal=USER=user \
-     --from-literal=PASSWORD='P@ss!word#123' \
-     -n $NAMESPACE
-   ```
-
-### Debugging Credential Issues
-
-Check pod logs for credential errors:
-
-```bash
-kubectl logs <pod-name> -n $NAMESPACE | grep -i credential
-```
-
-Verify environment variables in a running pod:
-
-```bash
-kubectl exec -it <pod-name> -n $NAMESPACE -- env | grep -E '_(USER|PASSWORD|TOKEN)$'
-```
-
-## Security Best Practices
-
-1. **Use Kubernetes RBAC** to restrict who can read secrets.
-
-2. **Enable encryption at rest** for etcd to protect secrets.
-
-3. **Rotate credentials regularly** using the update pattern above.
-
-4. **Use separate credentials** for different purposes (don't reuse the merge DB credential for sources).
-
-5. **Consider external secret managers** (AWS Secrets Manager, HashiCorp Vault) for production environments - Yellow's AWS assembly supports AWS Secrets Manager natively.
+- `SecretStore` not Ready: inspect `kubectl describe secretstore ...` and the external-secrets
+  controller logs. Fix cloud identity, region/vault URL, or RBAC first.
+- `ExternalSecret` not Ready: confirm the exact normalized remote key and required JSON fields.
+- Secret exists but a job reports a missing credential: compare the model name, normalized Secret
+  name, credential type, and canonical key names.
+- Two credentials collide after normalization: rename one in the model; never share one Secret
+  accidentally.
+- Avoid `kubectl exec ... env`, `base64 -d`, shell tracing, and verbose cloud CLI output during
+  diagnosis because those can disclose credential values.

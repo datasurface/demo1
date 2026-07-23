@@ -39,7 +39,7 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
 
     git_config: GitCacheConfig = GitCacheConfig(
         enabled=True,
-        access_mode="ReadWriteOnce",
+        access_mode="ReadWriteMany",
         storageClass="standard"
     )
     yp_assembly: YellowExternalAirflow3AndMergeDatabase = YellowExternalAirflow3AndMergeDatabase(
@@ -57,7 +57,7 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         yp_assembly=yp_assembly,
         merge_datacontainer=k8s_merge_datacontainer,
         pv_storage_class="standard",
-        datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7",
+        datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4",
         dataPlatforms=[
             YellowDataPlatform(
                 "SCD4",

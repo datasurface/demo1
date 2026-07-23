@@ -1,251 +1,153 @@
 ---
-name: Start Initial Ingestion
-description: Guide for starting the initial data ingestion pipeline after deploying a new DataSurface Yellow model. Covers tagging, secrets, and DAG activation.
+name: start-initial-ingestion
+description: Start and verify the first DataSurface Yellow ingestion after a new demo1 deployment. Use to publish the initial model release, create source credentials, run infrastructure/model merge, discover generated DAGs, and confirm SCD4 data movement.
 ---
-# Starting Initial Ingestion
 
-This guide walks through the steps to get the data ingestion pipeline running after deploying a new DataSurface Yellow model.
+# Start initial ingestion
 
-## Context
+Use this only after a setup walkthrough has completed ring 1 and Airflow is healthy. Use
+`create-customer-data-simulator` when the demonstration needs changing source data.
 
-This is a demo project for customers doing their first DataSurface setup. Before using this skill, ensure:
+Current flow:
 
-1. **Environment is set up** - Use `/setup-walkthrough` to create the DataSurface Yellow environment on Docker Desktop with Kubernetes
-2. **Test data is available** - Use `/create-customer-data-simulator` to start a simulator that generates customer and address data in the source database
-
-Once the environment is running and test data is being generated, use this skill to start the ingestion pipeline.
-
-## Pipeline Flow Overview
-
-Understanding the pipeline flow helps diagnose where issues occur:
-
-```
-Infrastructure → Factory → Ingestion → Reconcile/CQRS
+```text
+stable model release
+  → demo-psp_infrastructure
+  → dynamic factory/system DAG discovery
+  → model-derived ingestion DAG
+  → SCD4 current/history and consumer outputs
 ```
 
-### DAG Descriptions
+Do not look for a standalone model-merge Job. Model merge and dynamic DAG configuration happen
+inside `demo-psp_infrastructure`.
 
-| DAG | Purpose |
-|-----|---------|
-| **demo-psp_infrastructure** | Main orchestrator. Loads model from git (tagged releases only), writes DAG configs to database, creates factory and system DAGs. |
-| **scd4_factory_dag** | Factory pattern. Reads ingestion configs from DB, dynamically creates/updates/removes ingestion DAGs. |
-| **scd4_datatransformer_factory** | Factory for DataTransformer jobs (masking, aggregation, derived columns). Creates transformer DAGs from DB configs. |
-| **scd4__CustomerDB_ingestion** | Dynamic ingestion DAG. Runs on cron schedule, snapshots source tables, writes to staging, performs SCD4 merge (maintains a current-snapshot table `..._m` plus a separate history table `..._mh`). |
-| **Demo_PSP_K8sMergeDB_reconcile** | Creates workspace views for consumers after ingestion tables exist. Maps DSG assignments to database views. |
-| **Demo_PSP_default_K8sMergeDB_cqrs** | CQRS replication. Copies merged data to target databases for querying. Separates write path (merge DB) from read paths. |
+## 1. Confirm the model release
 
-### Key Concepts
-
-- **Factory DAGs**: Don't process data themselves - they create other DAGs based on database configurations
-- **SCD4 Merge**: Slowly Changing Dimension Type 4 - keeps a clean current-snapshot table (`..._m`) plus a separate history table (`..._mh`) tracking inserts/updates/deletes over time
-- **Reconcile**: Only works after ingestion has created the merge tables
-- **Tagged Releases**: System only picks up model versions matching `v*.*.*-demo` pattern
-
-## Step 1: Verify Model is Tagged
-
-The reconcile and ingestion jobs only pick up **tagged releases** matching the pattern `v*.*.*-demo`.
-
-### Check existing tags
+The model loader selects stable GitHub Releases matching the RTE selector, normally
+`vN.N.N-demo`.
 
 ```bash
 git fetch --tags
-git tag -l "v*-demo" --sort=-version:refname | head -5
+git tag -l 'v*-demo' --sort=-version:refname | head -5
 ```
 
-### Check what tag the system is using
+If the desired commit is not published, merge it to `main`, create the next monotonically newer
+tag, push it, and create a stable, non-draft GitHub Release. A tag alone is insufficient. Do not
+move or delete old release tags.
+
+## 2. Create source credentials
+
+Read the actual `Credential` declarations in the released model. Normalize each name to
+lowercase/hyphenated Kubernetes form and create the canonical keys described by
+`create-k8-credential`.
+
+For a `USER_PASSWORD` source:
 
 ```bash
-kubectl logs -n demo1 deployment/demo-psp-mcp-server --tail=50 | grep -E "tag:|commit:"
+export NAMESPACE="${NAMESPACE:-demo1}"
+export SOURCE_SECRET="<normalized-model-credential-name>"
+
+kubectl create secret generic "$SOURCE_SECRET" \
+  --namespace "$NAMESPACE" \
+  --from-literal=USER="$SOURCE_DB_USER" \
+  --from-literal=PASSWORD="$SOURCE_DB_PASSWORD" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 ```
 
-### Create a new tag if needed
+The local, AWS, and Azure starters use direct Kubernetes Secrets by default. Run ESO checks only
+when the selected RTE explicitly configures an external secret provider.
+
+Verify names and keys without decoding values:
 
 ```bash
-# Tag current commit
-git tag v1.0.1-demo
-git push origin v1.0.1-demo
-
-# Or tag a specific commit
-git tag v1.0.1-demo <commit-hash>
-git push origin v1.0.1-demo
+kubectl describe secret "$SOURCE_SECRET" -n "$NAMESPACE"
 ```
 
-## Step 2: Create Required Secrets
+## 3. Check Airflow before model merge
 
-**REQUIRED**: The ingestion DAG needs credentials to access the source database. Create this secret before proceeding.
-
-### Check if secret already exists
+Use the Airflow 3 scheduler container:
 
 ```bash
-kubectl get secret customer-source-credential -n demo1 2>/dev/null && echo "Secret exists" || echo "Secret MISSING - create it below"
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json
+
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list --output json
 ```
 
-### Create the customer-source-credential secret
+Resolve import errors before continuing.
+
+## 4. Trigger infrastructure/model merge
 
 ```bash
-kubectl create secret generic customer-source-credential \
-  --from-literal=USER=postgres \
-  --from-literal=PASSWORD=password \
-  -n demo1
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags unpause demo-psp_infrastructure
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger demo-psp_infrastructure
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
-**Naming rules for secrets:**
-- Lowercase
-- Underscores (`_`) become hyphens (`-`)
-- Keys are uppercase: `USER`, `PASSWORD`, `TOKEN`
+Wait for the new run to reach `success`. Use the Airflow UI task logs for failures. The merge task
+loads the model release and the factory-creation task refreshes the model-derived DAG set.
 
-See `/create-k8-credential` skill for detailed credential creation.
+## 5. Discover the generated DAG IDs
 
-## Step 3: Unpause DAGs
-
-**IMPORTANT**: DAGs are paused by default. You MUST unpause them BEFORE triggering, otherwise triggers will be ignored.
+Wait for a scheduler parse cycle, then list DAGs:
 
 ```bash
-# Unpause all key DAGs FIRST
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_factory_dag
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_datatransformer_factory
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list --output json
 ```
 
-Verify DAGs are unpaused (is_paused should be False):
+Identify the ingestion DAG for the desired datastore/workspace from the output. Also confirm the
+expected reconcile, CQRS, and DataTransformer DAGs for the released model. Do not hard-code old
+example IDs: platform names, model names, and sharding affect them.
+
+## 6. Start the ingestion DAG
 
 ```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/null
+export INGESTION_DAG_ID="<discovered-dag-id>"
+
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags unpause "$INGESTION_DAG_ID"
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger "$INGESTION_DAG_ID"
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs "$INGESTION_DAG_ID" --output json
 ```
 
-## Step 4: Trigger the Pipeline
+Wait for the run to succeed. If the DAG never appears, rerun and inspect
+`demo-psp_infrastructure`; do not trigger a historical fixed-name factory DAG.
 
-After secrets are created and DAGs are unpaused, trigger the pipeline in order:
+## 7. Verify data
 
-### 4a. Trigger Infrastructure DAG
+Use the Airflow task log plus `check-system-health` and `verify-data-fidelity`. Require:
+
+- the ingestion run reached `success`;
+- its Kubernetes work pod completed without warning events;
+- the SCD4 current table contains the expected live rows;
+- the history table records changes across simulator updates;
+- batch metrics advanced;
+- downstream reconcile/CQRS work completed when the model requests it.
+
+Discover physical table names from the model and database metadata rather than assuming the old
+`CustomerDB` sample names.
+
+Useful cluster checks:
 
 ```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
+kubectl get pods,jobs -n "$NAMESPACE" -o wide
+kubectl get events -n "$NAMESPACE" \
+  --field-selector type=Warning --sort-by=.lastTimestamp
 ```
 
-Wait ~20 seconds for completion.
-
-### 4b. Verify factory and system DAGs were created
-
-```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/null | grep -E "(factory|reconcile|cqrs|infrastructure)"
-```
-
-Expected DAGs:
-```
-demo-psp_infrastructure          - Main infrastructure DAG (triggers model merge)
-Demo_PSP_K8sMergeDB_reconcile    - Creates workspace views after tables exist
-Demo_PSP_default_K8sMergeDB_cqrs - CQRS replication DAG
-scd4_datatransformer_factory     - Factory for data transformer DAGs
-scd4_factory_dag                 - Factory that creates ingestion DAGs
-```
-
-### 4c. Trigger Factory DAG to create ingestion DAGs
-
-```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4_factory_dag
-```
-
-Wait ~15 seconds, then verify:
-
-```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list | grep ingestion
-```
-
-Expected output:
-```
-scd4__CustomerDB_ingestion
-```
-
-### 4d. Unpause and trigger the ingestion DAG
-
-```bash
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4__CustomerDB_ingestion
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4__CustomerDB_ingestion
-```
-
-## Step 5: Verify Ingestion is Running
-
-### Check ingestion DAG runs
-
-```bash
-kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -lt "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -5
-```
-
-### Check ingestion logs for success
-
-```bash
-# Get the latest run
-LATEST_RUN=$(kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -t "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -1)
-
-# Check for success
-kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  cat "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/$LATEST_RUN/task_id=snapshot_merge_job/attempt=1.log" | \
-  grep -E "(RESULT_CODE|completed|Ingested|total_records)"
-```
-
-Expected output:
-```
-"Job completed successfully"
-"total_records_ingested": 354
-"DATASURFACE_RESULT_CODE=0"
-```
-
-## Troubleshooting Checklist
-
-| Issue | Check | Solution |
-|-------|-------|----------|
-| No dynamic DAGs | Model not tagged | Create and push tag `v*.*.*-demo` |
-| DAG creation failed | Missing secret | Create K8s secret (see Step 2) |
-| Trigger ignored / DAG not running | DAGs paused | Unpause BEFORE triggering (see Step 3) |
-| Factory finds 0 configs | Infrastructure hasn't run | Unpause and trigger `demo-psp_infrastructure` first |
-| Reconcile finds no tables | Ingestion hasn't run | Wait for ingestion DAG to complete |
-
-## Quick Start Commands
-
-Run these in sequence to start initial ingestion:
-
-```bash
-# 1. Ensure model is tagged and pushed (use appropriate version)
-git tag v1.0.1-demo && git push origin v1.0.1-demo
-
-# 2. Create the required customer-source-credential secret
-kubectl create secret generic customer-source-credential \
-  --from-literal=USER=postgres \
-  --from-literal=PASSWORD=password \
-  -n demo1
-
-# 3. Unpause all DAGs FIRST (triggers are ignored on paused DAGs)
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause demo-psp_infrastructure
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_factory_dag
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4_datatransformer_factory
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_K8sMergeDB_reconcile
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause Demo_PSP_default_K8sMergeDB_cqrs
-
-# 4. Trigger infrastructure DAG to load model and create factory DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger demo-psp_infrastructure
-sleep 20
-
-# 5. Trigger factory DAG to create ingestion DAGs
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4_factory_dag
-sleep 15
-
-# 6. Unpause and trigger ingestion DAG (created by factory in step 5)
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags unpause scd4__CustomerDB_ingestion
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags trigger scd4__CustomerDB_ingestion
-```
-
-## Verifying Everything is Working
-
-```bash
-# Check all DAGs are unpaused (is_paused should be False)
-kubectl exec -n demo1 deployment/airflow-api-server -- airflow dags list 2>/dev/null
-
-# Check recent ingestion logs for success
-kubectl exec -n demo1 airflow-worker-0 -c worker -- \
-  ls -lt "/opt/airflow/logs/dag_id=scd4__CustomerDB_ingestion/" | head -3
-```
+Report the model release, source credential name/type, infrastructure run state, discovered
+ingestion DAG ID, ingestion run state, SCD4 row/history checks, and any verification that could not
+run.

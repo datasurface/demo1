@@ -27,7 +27,7 @@ MERGE_DBNAME: str = "merge_db"
 AIRFLOW_HOST: str = "PLACEHOLDER_PG_FQDN"
 AIRFLOW_PORT: int = 5432
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
-DATASURFACE_VERSION: str = "1.3.7"
+DATASURFACE_VERSION: str = "1.8.4"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:
@@ -51,7 +51,10 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         namespace=KUB_NAME_SPACE,
         git_cache_config=git_config,
         afHostPortPair=HostPortPair(AIRFLOW_HOST, AIRFLOW_PORT),
-        airflowServiceAccount=AIRFLOW_SERVICE_ACCOUNT
+        airflowServiceAccount=AIRFLOW_SERVICE_ACCOUNT,
+        # The starter uses administrator-managed namespace-local Kubernetes
+        # Secrets. Customers can opt into "azure" or "vault" ESO integration.
+        externalSecretProvider=None
     )
 
     psp: YellowPlatformServiceProvider = YellowPlatformServiceProvider(

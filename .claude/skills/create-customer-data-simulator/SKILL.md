@@ -1,272 +1,212 @@
 ---
-name: This runs the datasurface customer data simulator
-description: This runs a simulator that generates data for customers and their addresses for testing purposes.
+name: create-customer-data-simulator
+description: Run the packaged DataSurface customer and address simulator locally or as a restartable Kubernetes Deployment. Use to generate PostgreSQL, SQL Server, or Snowflake source changes for a demo1 environment.
 ---
 
-# Create source tables and initial test data using the data simulator
+# Run the customer data simulator
 
-The simulator uses a database called customer_db. The simulator itself will create the 2 tables (customers, addresses) and then start populating them with data and simulating changes. It supports PostgreSQL, SQL Server, and Snowflake databases.
+The supported entry point is:
 
-## Environment Variables
-
-Ask the user which database type they want to target, then collect the appropriate variables.
-
-### Common variables
-
-```bash
-NAMESPACE=demo1                  # Kubernetes namespace
-DATASURFACE_VERSION=1.1.0        # DataSurface image version
-DB_TYPE=postgres                 # One of: postgres, sqlserver, snowflake
-DB_HOST=host.docker.internal     # Database hostname
-DB_DATABASE=customer_db          # Database name
+```text
+datasurface-data-simulator
 ```
 
-### PostgreSQL
+It is packaged in current DataSurface wheels and images. Do not use the removed
+`src/tests/data_change_simulator.py` path or invoke the compiled implementation with `python -m`.
+
+The simulator creates `customers` and `addresses` with `--create-tables`, then generates inserts,
+updates, and deletes. PostgreSQL and SQL Server support bulk seed and rate-based churn. Snowflake
+supports interval mode and either key-pair or SPCS file-token authentication.
+
+## Inputs
 
 ```bash
-DB_TYPE=postgres
-DB_USER=postgres
-DB_PASSWORD=password
-DB_HOST=host.docker.internal     # Docker Desktop: host.docker.internal
-DB_PORT=5432                     # Default for postgres
+NAMESPACE=demo1
+DATASURFACE_VERSION=1.8.4
+DB_TYPE=postgres                 # postgres, sqlserver, or snowflake
+DB_HOST=host.docker.internal
+DB_PORT=5432
+DB_DATABASE=customer_db
+CREDENTIAL_SECRET=customer-source-credential
 ```
 
-### SQL Server
+Create the database itself before the first PostgreSQL or SQL Server run. The simulator creates
+tables, not the database. Keep the source identity separate from merge/CQRS/transformer identities.
+
+## Verify the image entry point
 
 ```bash
-DB_TYPE=sqlserver
-DB_USER=sa
-DB_PASSWORD='pass@w0rd'
-DB_HOST=sqlserver-co             # Remote SQL Server hostname
-DB_PORT=1433                     # Default for sqlserver
+IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}"
+docker run --rm --platform linux/amd64 "$IMAGE" datasurface-data-simulator --help
 ```
 
-### Snowflake
+## Short local connectivity test
+
+PostgreSQL:
 
 ```bash
-DB_TYPE=snowflake
-DB_USER=DATASURFACE
-DB_ACCOUNT=<snowflake-account-id>     # Snowflake account identifier
-DB_DATABASE=SNOWFLAKE_LEARNING_DB
-DB_WAREHOUSE=COMPUTE_WH
-DB_SCHEMA=PUBLIC                 # Default: PUBLIC
-DB_ROLE=                         # Optional Snowflake role
-```
-
-Snowflake uses key-pair authentication by default. The private key is resolved in order:
-1. `--private-key-path <file>` — explicit PEM file path
-2. `SNOWFLAKE_PRIVATE_KEY` env var — for K8s pods (secret injected as env var)
-3. `~/.snowflake/rsa_key.p8` — default local file
-
-If none are found, falls back to `--user`/`--password`.
-
-## Step 1: Create the customer_db database (if it doesn't exist)
-
-### PostgreSQL (Docker Desktop)
-
-```bash
-docker exec datasurface-postgres psql -U $DB_USER -lqt | grep customer_db
-# If it doesn't exist:
-docker exec datasurface-postgres psql -U $DB_USER -c "CREATE DATABASE customer_db;"
-```
-
-### PostgreSQL (remote)
-
-```bash
-PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -lqt | grep customer_db
-# If it doesn't exist:
-PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -c "CREATE DATABASE customer_db;"
-```
-
-### SQL Server
-
-```bash
-sqlcmd -S $DB_HOST -U $DB_USER -P $DB_PASSWORD -C -Q "SELECT name FROM sys.databases WHERE name = 'customer_db'"
-# If it doesn't exist:
-sqlcmd -S $DB_HOST -U $DB_USER -P $DB_PASSWORD -C -Q "CREATE DATABASE customer_db"
-```
-
-### Snowflake
-
-The simulator creates the database and tables automatically with `--create-tables`.
-
-## Step 2: Test locally with Docker (recommended before K8s deployment)
-
-Run a quick test with `--max-changes 10` to verify connectivity before deploying to the cluster.
-
-**Important:** If the database host is a Tailscale or non-public hostname, Docker containers cannot resolve it directly. Use `--add-host` to map the hostname to its IP:
-
-```bash
-# Resolve the hostname first
-dscacheutil -q host -a name $DB_HOST
-```
-
-### PostgreSQL
-
-```bash
-docker run --rm \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python src/tests/data_change_simulator.py \
+docker run --rm --platform linux/amd64 \
+  "$IMAGE" \
+  datasurface-data-simulator \
   --db-type postgres \
   --host "$DB_HOST" \
   --port "$DB_PORT" \
-  --database customer_db \
+  --database "$DB_DATABASE" \
   --user "$DB_USER" \
   --password "$DB_PASSWORD" \
   --create-tables \
-  --max-changes 10 \
-  --verbose
+  --max-changes 10
 ```
 
-### SQL Server
+SQL Server uses the same command with `--db-type sqlserver` and port `1433`. When a Docker
+container cannot resolve a private hostname, use a reachable IP or an explicit `--add-host`
+mapping after verifying the address. Do not copy historical dolly hostnames into a new environment.
+
+For Snowflake key-pair auth, mount the key read-only and pass its container path:
 
 ```bash
-docker run --rm \
-  --add-host=$DB_HOST:<IP_ADDRESS> \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python src/tests/data_change_simulator.py \
-  --db-type sqlserver \
-  --host "$DB_HOST" \
-  --port "$DB_PORT" \
-  --database customer_db \
-  --user "$DB_USER" \
-  --password "$DB_PASSWORD" \
-  --create-tables \
-  --max-changes 10 \
-  --verbose
-```
-
-### Snowflake
-
-```bash
-docker run --rm \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python src/tests/data_change_simulator.py \
+docker run --rm --platform linux/amd64 \
+  -v /secure/path/rsa_key.p8:/run/secrets/snowflake-key:ro \
+  "$IMAGE" \
+  datasurface-data-simulator \
   --db-type snowflake \
   --account "$DB_ACCOUNT" \
   --database "$DB_DATABASE" \
   --user "$DB_USER" \
   --warehouse "$DB_WAREHOUSE" \
+  --private-key-path /run/secrets/snowflake-key \
+  --passphrase "$SNOWFLAKE_PASSPHRASE" \
   --create-tables \
-  --max-changes 10 \
-  --verbose
+  --max-changes 10
 ```
 
-## Step 3: Check for existing simulator pod
+## Kubernetes: use a Deployment and Secret refs
+
+A Deployment is preferable to a one-shot `kubectl run` pod: it restarts after node or process
+failure and can be frozen with `replicas=0` during resets.
+
+PostgreSQL example:
 
 ```bash
-kubectl get pod data-simulator -n $NAMESPACE
+cat <<YAML | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: source-simulator-pg
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: source-simulator-pg
+  template:
+    metadata:
+      labels:
+        app: source-simulator-pg
+    spec:
+      imagePullSecrets:
+        - name: datasurface-registry
+      containers:
+        - name: simulator
+          image: ${IMAGE}
+          command: ["datasurface-data-simulator"]
+          args:
+            - --db-type
+            - postgres
+            - --host
+            - ${DB_HOST}
+            - --port
+            - "${DB_PORT}"
+            - --database
+            - ${DB_DATABASE}
+            - --user
+            - \$(DB_USER)
+            - --password
+            - \$(DB_PASSWORD)
+            - --create-tables
+            - --min-interval
+            - "1"
+            - --max-interval
+            - "3"
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${CREDENTIAL_SECRET}
+                  key: USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${CREDENTIAL_SECRET}
+                  key: PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 2Gi
+YAML
+
+kubectl rollout status deployment/source-simulator-pg \
+  -n "$NAMESPACE" --timeout=420s
+kubectl logs deployment/source-simulator-pg -n "$NAMESPACE" --tail=30
 ```
 
-If a pod already exists, delete it first:
+For SQL Server, use a distinct Deployment such as `source-simulator-sql`, `--db-type sqlserver`,
+port `1433`, and its own credential Secret.
+
+Never merge-patch a container list with only `name`, `image`, or `command`; Kubernetes replaces the
+list entry and drops `args` and credential `env` refs. Use `kubectl set image`, a JSON patch for one
+field, or reapply the complete manifest.
+
+## Scale mode
+
+PostgreSQL and SQL Server can seed and drive sustained churn:
+
+```text
+--seed-rows 1000000
+--target-rate 5000
+--batch-size 500
+--heartbeat-interval 10
+```
+
+Use `--seed-only` to provision then exit. Do not combine high `--target-rate` with `--verbose`;
+per-operation logging can overwhelm the pod. Size memory from measured source volume—the simulator
+keeps a compact ID cache and large sources still need more than a tiny default pod.
+
+## Operate safely
 
 ```bash
-kubectl delete pod data-simulator -n $NAMESPACE
+# Freeze writes during a reset.
+kubectl scale deployment/source-simulator-pg -n "$NAMESPACE" --replicas=0
+
+# Resume after source tables, CDC, and credentials are ready.
+kubectl scale deployment/source-simulator-pg -n "$NAMESPACE" --replicas=1
+kubectl rollout status deployment/source-simulator-pg -n "$NAMESPACE"
+
+# Remove it.
+kubectl delete deployment/source-simulator-pg -n "$NAMESPACE"
 ```
 
-## Step 4: Start the data simulator on Kubernetes
+If source tables are preserved, leave the simulator deployed unless the reset procedure explicitly
+requires a write freeze. If source tables are dropped, stop it first, recreate the tables, restore
+SQL Server CDC after table creation, verify access, and only then resume writes.
 
-### PostgreSQL
+## Verify
 
 ```bash
-kubectl run data-simulator --restart=Never \
-  --image=registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  -n "$NAMESPACE" \
-  -- python src/tests/data_change_simulator.py \
-  --db-type postgres \
-  --host "$DB_HOST" \
-  --port "$DB_PORT" \
-  --database customer_db \
-  --user "$DB_USER" \
-  --password "$DB_PASSWORD" \
-  --create-tables \
-  --max-changes 1000000 \
-  --verbose
+kubectl get deployment,pod -n "$NAMESPACE" -l app=source-simulator-pg
+kubectl logs deployment/source-simulator-pg -n "$NAMESPACE" --tail=50
 ```
 
-### SQL Server
+Interval mode logs individual operations. Rate mode emits heartbeat lines with achieved rate and
+counts. Confirm database row counts independently before treating the simulator as healthy.
 
-```bash
-kubectl run data-simulator --restart=Never \
-  --image=registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  -n "$NAMESPACE" \
-  -- python src/tests/data_change_simulator.py \
-  --db-type sqlserver \
-  --host "$DB_HOST" \
-  --port "$DB_PORT" \
-  --database customer_db \
-  --user "$DB_USER" \
-  --password "$DB_PASSWORD" \
-  --create-tables \
-  --max-changes 1000000 \
-  --verbose
-```
+Common failures:
 
-### Snowflake
-
-For K8s, inject the private key via a secret as an environment variable:
-
-```bash
-kubectl run data-simulator --restart=Never \
-  --image=registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  --env="SNOWFLAKE_PRIVATE_KEY=$(kubectl get secret snowflake-key -n $NAMESPACE -o jsonpath='{.data.private-key}' | base64 -d)" \
-  --env="SNOWFLAKE_PASSPHRASE=$(kubectl get secret snowflake-key -n $NAMESPACE -o jsonpath='{.data.passphrase}' | base64 -d)" \
-  -n "$NAMESPACE" \
-  -- python src/tests/data_change_simulator.py \
-  --db-type snowflake \
-  --account "$DB_ACCOUNT" \
-  --database "$DB_DATABASE" \
-  --user "$DB_USER" \
-  --warehouse "$DB_WAREHOUSE" \
-  --create-tables \
-  --max-changes 1000000 \
-  --verbose
-```
-
-**Note:** When running on a remote cluster where the database hostname requires DNS configuration (e.g., Tailscale hostnames), ensure CoreDNS is configured with the appropriate host entries. See the **remote-setup-walkthrough** skill for CoreDNS configuration.
-
-## Step 5: Verify the simulator is running
-
-Wait a moment for the simulator to start, then check status and logs:
-
-```bash
-kubectl get pod data-simulator -n $NAMESPACE
-kubectl logs data-simulator -n $NAMESPACE --tail=20
-```
-
-You should see messages like:
-- "Connected to SQLServerDatabase(...)" or "Connected to PostgresDatabase(...)"
-- "CREATED customer..." or "UPDATED customer..."
-- "ADDED address..." or "DELETED address..."
-
-## Stopping the simulator
-
-```bash
-kubectl delete pod data-simulator -n $NAMESPACE
-```
-
-## Simulator operations
-
-The simulator performs these operations with weighted random selection:
-
-| Operation | Weight | Description |
-|-----------|--------|-------------|
-| INSERT customer | 15% | New customer with initial address |
-| UPDATE customer | 25% | Change email and/or phone |
-| INSERT address | 20% | Add address to existing customer |
-| UPDATE address | 30% | Change street, city, state, or zip |
-| DELETE address | 10% | Remove an address |
-
-## Troubleshooting
-
-### Login timeout (SQL Server / PostgreSQL)
-
-- Verify the database host is reachable from inside pods: `kubectl run test --rm -it --restart=Never --image=busybox -n $NAMESPACE -- nc -zv $DB_HOST $DB_PORT`
-- For remote clusters, check CoreDNS has entries for the database hostname
-- For Docker Desktop, ensure `DB_HOST=host.docker.internal`
-
-### Snowflake authentication failures
-
-- Verify the private key is correctly injected: `kubectl exec data-simulator -n $NAMESPACE -- env | grep SNOWFLAKE`
-- Check that the Snowflake user has the correct RSA public key registered
-- Try with `--password` flag to fall back to password auth for debugging
+- `command not found`: the image is stale or incomplete; inspect `datasurface-data-simulator --help`.
+- authentication failure: verify the Secret has `USER` and `PASSWORD` keys without decoding them.
+- connection timeout: test DNS and TCP reachability from the namespace.
+- Snowflake key-pair failure: verify PEM mounting and optional passphrase; SPCS uses
+  `--snowflake-auth spcs-token` and its runtime-mounted token instead of a Kubernetes credential.
