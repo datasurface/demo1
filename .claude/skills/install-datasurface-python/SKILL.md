@@ -1,148 +1,53 @@
 ---
-name: Install DataSurface Python Module
-description: Install the DataSurface Python package from GitLab PyPI registry.
+name: install-datasurface-python
+description: Install the pinned DataSurface Python package from the GitLab package registry. Use when preparing a local demo1 development, lint, or validation environment.
 ---
-# Install DataSurface Python Module
 
-Install the DataSurface Python package from the GitLab package registry.
+# Install DataSurface
 
-## Prerequisites
-
-- Python >= 3.12 (required for SQL Server and Snowflake dependencies)
-- GitLab PyPI credentials:
-  - `DATASURFACE_USER` - Your deploy token username
-  - `DATASURFACE_TOKEN` - Your deploy token value
-  - Project ID: `77796931`
-
-## Check Python Version
+Use Python 3.12 or newer and an isolated virtual environment:
 
 ```bash
-python --version
-# Must be 3.12.x or higher
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 ```
 
-## Steps
+Read `configure-pip-datasurface` and create the URL-encoded `PIP_EXTRA_INDEX_URL` from protected
+`DATASURFACE_USER` and `DATASURFACE_TOKEN` variables. Do not pass a raw token in a command-line URL.
 
-### 1. Set Environment Variables
+Install the repository pin:
 
 ```bash
-export DATASURFACE_USER="your-deploy-token-username"
-export DATASURFACE_TOKEN="your-deploy-token"
-export DATASURFACE_VERSION="1.1.0"
+python -m pip install -r requirements.txt
+unset PIP_EXTRA_INDEX_URL
 ```
 
-### 2. Install with pip
-
-**Latest version:**
-
-```bash
-pip install datasurface \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-**Specific version:**
-
-```bash
-pip install datasurface==${DATASURFACE_VERSION} \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-### 3. Verify Installation
-
-```bash
-pip show datasurface
-python -c "import datasurface; print(datasurface.__version__)"
-```
-
-## Optional Dependencies
-
-**With DB2 support (AMD64 only):**
-
-```bash
-pip install "datasurface[db2]" \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-## Quick One-Liner
-
-```bash
-pip install datasurface --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-## Using in Virtual Environment
-
-```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# or: .venv\Scripts\activate  # Windows
-
-# Install
-pip install datasurface \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-## Upgrading
-
-```bash
-pip install --upgrade datasurface \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-## Troubleshooting
-
-### Authentication Failed
+For this revision, `requirements.txt` pins:
 
 ```text
-ERROR: 401 Client Error: Unauthorized
+datasurface==1.8.4
 ```
 
-**Solution:** Verify credentials:
+Do not install an unpinned “latest” release while validating demo1; the package, runtime image,
+and CI validator versions must agree.
+
+Verify:
 
 ```bash
-# Test access (should list versions)
-pip index versions datasurface \
-  --index-url "https://${DATASURFACE_USER}:${DATASURFACE_TOKEN}@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
+python -m pip show datasurface
+python -c 'from importlib.metadata import version; print(version("datasurface"))'
+python -m unittest test_loads
 ```
 
-### Wrong Python Version
-
-```text
-ERROR: Package requires Python >=3.12
-```
-
-**Solution:** Use Python 3.12 or higher:
+DB2 support is AMD64-only:
 
 ```bash
-python3.12 -m pip install datasurface ...
-# or use pyenv/conda to switch Python versions
+export PIP_EXTRA_INDEX_URL="<rebuild with configure-pip-datasurface>"
+python -m pip install "datasurface[db2]==1.8.4"
+unset PIP_EXTRA_INDEX_URL
 ```
 
-### Package Not Found
-
-```text
-ERROR: No matching distribution found for datasurface
-```
-
-**Solution:** Check the index URL is correct and credentials are valid:
-
-```bash
-# Verify URL format
-echo "https://${DATASURFACE_USER}:****@gitlab.com/api/v4/projects/77796931/packages/pypi/simple"
-```
-
-### SSL Certificate Error
-
-```text
-SSLError: certificate verify failed
-```
-
-**Solution:** Update certificates:
-
-```bash
-pip install --upgrade certifi
-```
-
-## Security Note
-
-Never commit credentials to version control. Use environment variables or a secrets manager.
+On authentication failure, rotate or correct the deploy token. On package-not-found, confirm
+project `77796931`, the exact pin, and the Python version. Do not log `pip config` output or an
+authenticated index URL.

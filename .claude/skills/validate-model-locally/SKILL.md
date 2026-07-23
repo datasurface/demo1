@@ -38,7 +38,7 @@ Swap the second argument for the RTE you changed: `demo`, `aws`, or `azure` (see
 ## Step 2: Run the repo's own test as the fuller check
 
 ```bash
-python -m pytest test_loads.py -q
+python -m unittest test_loads
 ```
 
 `test_loads.py` loads the ecosystem twice (once bare, once against the `demo` RTE), calls `ecosys.lintAndHydrateCaches()`, and asserts no errors in the resulting `ValidationTree`. This is the same check CI runs on PR validation, so a green `test_loads.py` locally should mean a green PR check — barring branch/permission issues on the CI side.
@@ -65,4 +65,4 @@ For anything not in this table, read the `Problem` message text closely — it n
 
 ## When it's green
 
-Once both the one-liner and `python -m pytest test_loads.py -q` pass, proceed to `edit-model-fragment` to commit and push. CI runs the same validation path, so a locally-green model should pass CI (barring branch protection or permission issues unrelated to model content).
+Once both the one-liner and `python -m unittest test_loads` pass, proceed to `edit-model-fragment` to commit and push. CI runs the same validation path, so a locally-green model should pass CI (barring branch protection or permission issues unrelated to model content).

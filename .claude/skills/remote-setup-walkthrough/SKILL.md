@@ -1,1019 +1,389 @@
 ---
-name: DataSurface Remote Cluster Setup Walkthrough
-description: Interactive walkthrough for setting up a DataSurface Yellow environment on a remote Kubernetes cluster accessed via SSH, using external PostgreSQL databases (separate hosts for Airflow metadata and merge data) and Longhorn storage. Use for on-prem or self-managed remote clusters.
+name: remote-setup-walkthrough
+description: Set up demo1 on a remote self-managed Kubernetes cluster over SSH with external PostgreSQL, RWX storage, Airflow 3.3, administrator-managed Kubernetes Secrets, and the current infrastructure DAG. Use for on-premises or private Kubernetes rather than EKS or AKS.
 ---
 
-# DataSurface Remote Cluster Setup Walkthrough
+# Remote Kubernetes setup
 
-This skill guides you through setting up a DataSurface Yellow environment on a remote Kubernetes cluster accessed via SSH. It uses external PostgreSQL databases (separate hosts for Airflow metadata and merge data) and Longhorn storage.
+This path adapts the local demo1 setup to a cluster reached over SSH. It uses:
 
-## IMPORTANT: Execution Rules
+- separate external PostgreSQL databases for Airflow metadata and DataSurface merge data;
+- a storage class that supports `ReadWriteMany` for the shared Git cache;
+- Airflow 3.3 with the tested DataSurface Airflow image;
+- namespace-local Kubernetes Secrets by default;
+- current ring-0 artifacts and infrastructure-DAG model merge.
 
-1. **Execute steps sequentially** - Do not skip ahead or combine steps
-2. **Verify each step** - Confirm success before proceeding to the next step
-3. **Ask for missing information** - If environment variables or credentials are not provided, ask the user
-4. **Report failures immediately** - If any step fails, stop and troubleshoot before continuing
+Keep `externalSecretProvider=None` for the baseline. Add ESO only when the customer explicitly
+chooses and operates it.
 
-## Pre-Flight Checklist
+## Safety
 
-Before starting, verify the user has:
+1. Inspect existing namespaces, releases, databases, and storage before changing them.
+2. Do not drop databases, delete PVCs, or remove Git releases during a normal setup or repair.
+3. Keep credentials in environment variables or Secret input; never commit them.
+4. Verify each stage before continuing.
+5. Use a new model release; never move or delete an older release tag.
 
-- [ ] A remote Kubernetes cluster accessible via SSH
-- [ ] SSH key that authenticates to the cluster master node
-- [ ] `kubectl` and `helm` installed on the remote master node
-- [ ] Docker installed locally (for image pull and bootstrap generation)
-- [ ] `psql` installed locally (for database setup)
-- [ ] Two external PostgreSQL databases reachable from both local machine and K8s pods
-- [ ] GitHub Personal Access Token (needs repo access)
-- [ ] GitLab credentials for DataSurface images
-- [ ] `nfs-common` installed on all cluster nodes (required for Longhorn RWX volumes)
-- [ ] PostgreSQL `pg_hba.conf` configured to allow connections from pod CIDR and Tailscale network
+## Inputs and preflight
 
-Ask the user for these values if not already provided:
+Set non-secret inputs, then export secret inputs without echoing them:
 
 ```bash
-# SSH connection
-SSH_KEY               # Path to SSH private key (e.g., ~/.ssh/id_rsa_batch)
-SSH_USER              # SSH username (e.g., billy)
-SSH_HOST              # Remote master node hostname (e.g., cokub-master)
+export SSH_KEY="<absolute-key-path>"
+export SSH_USER="<remote-user>"
+export SSH_HOST="<cluster-control-host>"
+export NAMESPACE="demo1"
+export STORAGE_CLASS="<rwx-storage-class>"
+export AIRFLOW_DB_HOST="<airflow-postgres-host>"
+export MERGE_DB_HOST="<merge-postgres-host>"
+export PG_USER="<postgres-user>"
+export MODEL_REPO="<owner/model-repo>"
+export AIRFLOW_REPO="<owner/airflow-repo>"
+export DATASURFACE_VERSION="${DATASURFACE_VERSION:-1.8.4}"
 
-# Kubernetes
-NAMESPACE             # Kubernetes namespace (must use hyphens, not underscores)
-STORAGE_CLASS         # Storage class available on remote cluster
-
-# PostgreSQL
-AIRFLOW_DB_HOST       # Hostname of Airflow metadata database
-MERGE_DB_HOST         # Hostname of merge database
-PG_USER               # PostgreSQL username (default: postgres)
-PG_PASSWORD           # PostgreSQL password
-
-# GitHub
-GITHUB_USERNAME       # GitHub username
-GITHUB_MODEL_PULL_TOKEN   # GitHub PAT for model repository access
-GH_AIRFLOW_USER       # GitHub username for DAG sync
-GH_AIRFLOW_PAT        # GitHub PAT for DAG sync
-
-# GitLab
-GITLAB_CUSTOMER_USER  # GitLab deploy token username
-GITLAB_CUSTOMER_TOKEN # GitLab deploy token
-
-# Repositories
-MODEL_REPO            # Model repository (e.g., yourorg/demo_model)
-AIRFLOW_REPO          # Airflow DAG repository (e.g., yourorg/demo_airflow)
-
-# DataSurface
-DATASURFACE_VERSION   # DataSurface version (default: 1.1.0)
+export SSH_CMD="ssh -i $SSH_KEY $SSH_USER@$SSH_HOST"
+export SCP_CMD="scp -i $SSH_KEY"
 ```
 
-**Define an SSH helper** to use throughout (avoids repeating SSH options):
+Also export these secret inputs without echoing them: `PG_PASSWORD`, `GITHUB_USERNAME`,
+`GITHUB_MODEL_PULL_TOKEN`, `GITHUB_DAG_PULL_TOKEN`, `GITLAB_CUSTOMER_USER`, and
+`GITLAB_CUSTOMER_TOKEN`.
+
+Require `python3` locally to URI-encode the Airflow metadata credential safely.
+
+Verify access and current state:
 
 ```bash
-SSH_CMD="ssh -i $SSH_KEY $SSH_USER@$SSH_HOST"
-SCP_CMD="scp -i $SSH_KEY"
-```
-
-### Verify NFS client on all nodes
-
-**Required for Longhorn ReadWriteMany volumes.** Without `nfs-common`, pods using shared volumes will fail with mount errors.
-
-```bash
-# Check each node
-for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
-  $SSH_CMD "ssh $node 'dpkg -l | grep nfs-common'"
-done
-
-# If missing on any node, install:
-# ssh <node> "sudo apt-get update && sudo apt-get install -y nfs-common"
-```
-
-### Verify PostgreSQL network access
-
-Ensure `pg_hba.conf` on each PostgreSQL host allows connections from the Kubernetes pod network and Tailscale network:
-
-```bash
-# On each PostgreSQL host, add to /etc/postgresql/*/main/pg_hba.conf:
-# For Tailscale network (100.64.0.0/10)
-host    all    all    100.64.0.0/10    scram-sha-256
-
-# For pod network (check your cluster's pod CIDR)
-host    all    all    10.244.0.0/16    scram-sha-256
-
-# Reload PostgreSQL
-sudo systemctl reload postgresql
-```
-
-### Tune PostgreSQL for Airflow workloads
-
-The Helm values enable PgBouncer with `pool_mode = transaction` and `server_reset_query = DISCARD ALL`. Transaction mode returns connections to the pool after each transaction, preventing stale connection issues after DB restarts. PostgreSQL's default `max_connections = 100` is too low once PgBouncer and other databases share the server. On the Airflow metadata PostgreSQL host:
-
-```bash
-# In /etc/postgresql/*/main/postgresql.conf, set:
-max_connections = 200          # headroom for pgbouncer pools + admin connections
-
-# Restart PostgreSQL (max_connections requires restart, not just reload)
-sudo systemctl restart postgresql
-```
-
-For additional PostgreSQL memory tuning (shared_buffers, work_mem, etc.), see the [Performance Tuning](https://github.com/datasurface/datasurface/blob/main/docs/YellowOperationsGuide/410_PerformanceTuning.md) guide.
-
-### Verify SSH connectivity and cluster access
-
-```bash
-$SSH_CMD "hostname && kubectl get nodes"
-```
-
-All nodes should be in `Ready` status.
-
-### Detect the Kubernetes storage class
-
-```bash
+$SSH_CMD "kubectl cluster-info"
+$SSH_CMD "kubectl get nodes -o wide"
 $SSH_CMD "kubectl get storageclass"
+$SSH_CMD "kubectl get namespace '$NAMESPACE' 2>/dev/null || true"
+$SSH_CMD "helm list -A"
 ```
 
-Save the default storage class name (e.g., `longhorn`, `standard`). **Important:** If using Longhorn, the git-cache PVC must use `ReadWriteMany` access mode since it is shared between the MCP server deployment and batch jobs.
+Confirm the selected storage class supports RWX. For Longhorn, ensure every worker has an NFSv4
+client installed. Do not assume package names or install software across nodes without the
+operator's approval.
 
-### Verify database connectivity from local machine
+Confirm both database endpoints resolve and accept connections from a pod:
 
 ```bash
-PGPASSWORD=$PG_PASSWORD psql -h $AIRFLOW_DB_HOST -U $PG_USER -c "SELECT version();"
-PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -c "SELECT version();"
+$SSH_CMD "kubectl run remote-db-check --rm -i --restart=Never \
+  --image=busybox:1.36 -- \
+  sh -c 'nslookup \"$AIRFLOW_DB_HOST\" && nc -vz \"$AIRFLOW_DB_HOST\" 5432 && \
+  nslookup \"$MERGE_DB_HOST\" && nc -vz \"$MERGE_DB_HOST\" 5432'"
 ```
 
----
+If DNS fails, have the cluster DNS administrator add the correct internal zone/forwarding. Avoid
+hard-coded CoreDNS `hosts` entries unless they are the customer's established design.
 
-## Step 0: Configure CoreDNS for Database Hostname Resolution
+## 1. Prepare databases
 
-**CRITICAL: K8s pods cannot resolve Tailscale or other non-cluster hostnames by default.** The CoreDNS `hosts` plugin needs entries with FQDN aliases matching the pod search domains.
+Create or verify separate databases such as `airflow_db` and `demo_merge`. Preserve existing data
+unless the user explicitly requests a clean rebuild.
 
-### 0a. Check current CoreDNS configuration
+Test authentication from a trusted machine without printing the password:
 
 ```bash
-$SSH_CMD "kubectl get configmap coredns -n kube-system -o yaml"
+PGPASSWORD="$PG_PASSWORD" psql \
+  -h "$AIRFLOW_DB_HOST" -U "$PG_USER" -d airflow_db -c 'select 1'
+PGPASSWORD="$PG_PASSWORD" psql \
+  -h "$MERGE_DB_HOST" -U "$PG_USER" -d demo_merge -c 'select 1'
 ```
 
-### 0b. Check pod search domains
+Ensure PostgreSQL permits the cluster's actual pod/node CIDRs and requires the customer's chosen
+TLS mode. Do not copy example CIDRs into `pg_hba.conf` without discovering the real networks.
 
-```bash
-$SSH_CMD 'kubectl run dns-check --rm -it --restart=Never --image=busybox -- cat /etc/resolv.conf'
-```
+## 2. Configure the model
 
-Note the search domains (e.g., `default.svc.cluster.local svc.cluster.local cluster.local leopard-mizar.ts.net`). The last entry is typically the Tailscale domain if nodes use Tailscale.
+Update:
 
-### 0c. Add static host entries with FQDN aliases
+- `eco.py`: Git owner and repository;
+- `rte_demo.py`: namespace, merge host, and `MERGE_DBNAME` (set it to the merge database
+  created in Step 1, e.g. `demo_merge`; the starter default is `merge_db`), `ReadWriteMany`
+  Git cache, selected storage class, and DataSurface image `v1.8.4`;
+- `requirements.txt`: `datasurface==1.8.4`.
 
-**IMPORTANT:** Due to `ndots:5` in K8s pods, bare hostnames are tried with search domain suffixes first. You must add aliases for each search domain suffix that might match.
-
-For Tailscale hosts, add both the bare name and the `.ts-domain.ts.net` FQDN:
-
-```bash
-$SSH_CMD 'cat <<'"'"'EOF'"'"' | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: coredns
-  namespace: kube-system
-data:
-  Corefile: |
-    .:53 {
-        errors
-        health {
-           lameduck 5s
-        }
-        ready
-        hosts {
-           <AIRFLOW_DB_IP> <AIRFLOW_DB_HOST> <AIRFLOW_DB_HOST>.<TS_DOMAIN>
-           <MERGE_DB_IP> <MERGE_DB_HOST> <MERGE_DB_HOST>.<TS_DOMAIN>
-           fallthrough
-        }
-        kubernetes cluster.local in-addr.arpa ip6.arpa {
-           pods insecure
-           fallthrough in-addr.arpa ip6.arpa
-           ttl 30
-        }
-        prometheus :9153
-        forward . /etc/resolv.conf {
-           max_concurrent 1000
-        }
-        cache 30 {
-           disable success cluster.local
-           disable denial cluster.local
-        }
-        loop
-        reload
-        loadbalance
-    }
-EOF'
-```
-
-### 0d. Restart CoreDNS to pick up changes
-
-The `reload` plugin auto-detects changes, but a restart is more reliable:
-
-```bash
-$SSH_CMD "kubectl rollout restart deployment coredns -n kube-system && \
-  kubectl rollout status deployment coredns -n kube-system --timeout=60s"
-```
-
-### 0e. Verify resolution from inside a pod
-
-```bash
-$SSH_CMD "kubectl run dns-test --rm -it --restart=Never --image=busybox -- nslookup $AIRFLOW_DB_HOST"
-```
-
-**Expected:** The name resolves (via the Tailscale search domain suffix). Ignore NXDOMAIN errors for other search domain suffixes — as long as one resolves, it works. The key line is:
-
-```
-Name:    <hostname>.<ts-domain>
-Address: <IP>
-```
-
-### 0f. Verify database connectivity from inside a pod
-
-```bash
-$SSH_CMD "kubectl run db-test --rm -it --restart=Never --image=postgres:16 -- \
-  sh -c \"PGPASSWORD=$PG_PASSWORD psql -h $AIRFLOW_DB_HOST -U $PG_USER -c 'SELECT 1'\""
-```
-
-**Checkpoint:**
-- Both database hostnames resolve from inside K8s pods
-- Pods can connect to both databases
-
----
-
-## Step 1: Clean and Prepare PostgreSQL Databases
-
-Reset both databases to ensure clean state. Run from local machine using `psql`:
-
-```bash
-PGPASSWORD=$PG_PASSWORD psql -h $AIRFLOW_DB_HOST -U $PG_USER \
-  -c "DROP DATABASE IF EXISTS airflow_db;" \
-  -c "CREATE DATABASE airflow_db;"
-
-PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER \
-  -c "DROP DATABASE IF EXISTS merge_db;" \
-  -c "CREATE DATABASE merge_db;"
-```
-
-**Checkpoint:**
-- Both databases exist and are empty:
-
-```bash
-PGPASSWORD=$PG_PASSWORD psql -h $AIRFLOW_DB_HOST -U $PG_USER -c "\l airflow_db"
-PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -c "\l merge_db"
-```
-
----
-
-## Step 2: Customize the Model
-
-Edit three files to configure for the remote environment:
-
-### 2a. Edit `eco.py`
+The Git cache must remain shared:
 
 ```python
-GIT_REPO_OWNER: str = "<github-username>"
-GIT_REPO_NAME: str = "<model-repo-name>"
-```
-
-### 2b. Edit `rte_demo.py`
-
-Update namespace, merge host, storage class, and git cache access mode:
-
-```python
-KUB_NAME_SPACE: str = "<namespace>"          # Must use hyphens, not underscores
-MERGE_HOST: str = "<merge-db-host>"          # External PostgreSQL hostname
-```
-
-**Storage class and git cache (CRITICAL for remote clusters with Longhorn):**
-
-```python
-git_config: GitCacheConfig = GitCacheConfig(
+git_config=GitCacheConfig(
     enabled=True,
-    access_mode="ReadWriteMany",             # MUST be ReadWriteMany for shared PVC
-    storageClass="<storage-class>"           # e.g., "longhorn"
+    access_mode="ReadWriteMany",
+    storageClass="<rwx-storage-class>",
 )
 ```
 
-```python
-pv_storage_class="<storage-class>",          # e.g., "longhorn"
-```
+Keep the RTE's `externalSecretProvider=None`.
 
-### 2c. Edit `helm/airflow-values.yaml`
-
-Update the Airflow metadata DB host, DAG repo, and storage class:
-
-```yaml
-data:
-  metadataConnection:
-    host: <airflow-db-host>    # External PostgreSQL hostname (NOT host.docker.internal)
-
-dags:
-  gitSync:
-    repo: https://github.com/<org>/<airflow-repo>.git
-
-redis:
-  persistence:
-    storageClassName: <storage-class>
-
-workers:
-  persistence:
-    storageClassName: <storage-class>
-
-logs:
-  persistence:
-    storageClassName: <storage-class>
-```
-
-**Checkpoint:** All three files edited with correct values
-
----
-
-## Step 3: Initialize the Airflow DAG Repository
-
-**CRITICAL: Do this BEFORE installing Airflow.** The Airflow Helm chart uses git-sync init containers that will fail if the DAG repository is empty or missing the `main` branch. This causes pods to enter `Init:Error` state.
-
-### 3a. Generate bootstrap artifacts first (needed for the DAG file)
+Validate with the repository virtual environment:
 
 ```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
+.venv/bin/python -m unittest test_loads
+git diff --check
 ```
 
-**Checkpoint:** `ls generated_output/Demo_PSP/` shows:
-- kubernetes-bootstrap.yaml
-- demo_psp_infrastructure_dag.py
-- demo_psp_ring1_init_job.yaml
-- demo_psp_model_merge_job.yaml
-- demo_psp_reconcile_views_job.yaml
+## 3. Publish the model release
 
-### 3b. Initialize and push the DAG repository
+Use the normal reviewed flow to merge the configuration to `main`. Create the next
+monotonically newer `vN.N.N-demo` tag and publish it as a stable, non-draft GitHub Release.
+
+The Yellow model loader requires the release. A local commit or tag without a release is
+insufficient.
+
+## 4. Generate and publish bootstrap DAGs
+
+Follow `generate-bootstrap/SKILL.md` with:
 
 ```bash
-cd /tmp
-rm -rf <airflow-repo-name>
-git clone https://github.com/<org>/<airflow-repo>.git
-cd <airflow-repo-name>
-git checkout -b main
-mkdir -p dags
-cp <path-to-model>/generated_output/Demo_PSP/demo_psp_infrastructure_dag.py dags/
-git add dags/
-git commit -m "Add infrastructure DAG"
-git push -u origin main
+export PSP_NAME="Demo_PSP"
+export RTE_NAME="demo"
+export AIRFLOW_DAG_REPO="$AIRFLOW_REPO"
 ```
 
-**Checkpoint:** DAG file exists on GitHub under `dags/` on the `main` branch
-
----
-
-## Step 4: Push Customized Model to Repository
+Use:
 
 ```bash
-# Change remote to target model repository
-git remote set-url origin https://github.com/<org>/<model-repo>.git
-
-# Stage and commit
-git add eco.py helm/airflow-values.yaml rte_demo.py
-git commit -m "Customize model for remote cluster"
-
-# Push and tag
-git push -u origin main --force
-git tag v1.0.0-demo
-git push origin v1.0.0-demo
+python -m datasurface.entrypoints.platform generatePlatformBootstrap
 ```
 
-**Checkpoint:**
-- `git remote -v` shows the target model repository
-- `git tag` shows `v1.0.0-demo`
-- GitHub shows updated files and tag
+inside the `v1.8.4` image. Require these four artifacts:
 
----
+```text
+kubernetes-bootstrap.yaml
+demo_psp_infrastructure_dag.py
+demo_psp_ring1_init_job.yaml
+demo_psp_reconcile_views_job.yaml
+```
 
-## Step 5: Create Kubernetes Namespace and Secrets
+Publish every generated `*_dag.py` to the DAG repository before installing Airflow. Ensure its
+`main` branch exists so git-sync can start.
 
-All commands run via SSH on the remote master node.
+## 5. Prepare remote Airflow values
 
-**IMPORTANT:** Kubernetes namespace names must be valid DNS labels — lowercase alphanumeric and hyphens only. **Underscores are not allowed.**
+Create a temporary copy of `helm/airflow-values.yaml`; do not overwrite the local example merely
+to customize the remote installation:
 
 ```bash
-$SSH_CMD "kubectl create namespace $NAMESPACE"
+export REMOTE_AIRFLOW_VALUES=$(mktemp /tmp/demo1-airflow-values.XXXXXX.yaml)
+cp helm/airflow-values.yaml "$REMOTE_AIRFLOW_VALUES"
+```
 
-# PostgreSQL credentials for Airflow metadata DB
-$SSH_CMD "kubectl create secret generic postgres \
-  --from-literal=USER=$PG_USER \
-  --from-literal=PASSWORD=$PG_PASSWORD \
-  -n $NAMESPACE"
+Update `$REMOTE_AIRFLOW_VALUES` with:
 
-# PostgreSQL credentials for merge database
-$SSH_CMD "kubectl create secret generic postgres-demo-merge \
-  --from-literal=USER=$PG_USER \
-  --from-literal=PASSWORD=$PG_PASSWORD \
-  -n $NAMESPACE"
+- `data.metadataSecretName: airflow-metadata`;
+- `https://github.com/${AIRFLOW_REPO}.git`;
+- the RWX storage class for logs and the appropriate class for Redis/workers;
+- the current tested Airflow tag
+  `3.3.0-azure-supported-merge-drivers-20260714`;
+- production-appropriate Airflow admin credentials.
 
-# Git credentials for model repository
-$SSH_CMD "kubectl create secret generic git \
-  --from-literal=TOKEN=$GITHUB_MODEL_PULL_TOKEN \
-  -n $NAMESPACE"
+Keep the custom Airflow image repository:
 
-# Git credentials for DAG sync
-$SSH_CMD "kubectl create secret generic git-dags \
-  --from-literal=GIT_SYNC_USERNAME=$GH_AIRFLOW_USER \
-  --from-literal=GIT_SYNC_PASSWORD=$GH_AIRFLOW_PAT \
-  --from-literal=GITSYNC_USERNAME=$GH_AIRFLOW_USER \
-  --from-literal=GITSYNC_PASSWORD=$GH_AIRFLOW_PAT \
-  -n $NAMESPACE"
+```text
+registry.gitlab.com/datasurface-inc/datasurface/airflow
+```
 
-# GitLab registry credentials
-$SSH_CMD "kubectl create secret docker-registry datasurface-registry \
+Render before installing:
+
+```bash
+helm repo add apache-airflow https://airflow.apache.org
+helm repo update apache-airflow
+helm template airflow apache-airflow/airflow \
+  --namespace "$NAMESPACE" \
+  --values "$REMOTE_AIRFLOW_VALUES" >/tmp/demo1-airflow-rendered.yaml
+```
+
+Review the render for the expected storage classes, image tag, DAG repository, and
+`airflow-metadata` Secret reference.
+Delete the temporary values/render files after the installation is verified.
+
+## 6. Create namespace-local Secrets
+
+Create the namespace if absent:
+
+```bash
+$SSH_CMD "kubectl create namespace '$NAMESPACE' --dry-run=client -o yaml | kubectl apply -f -"
+```
+
+Apply Secrets idempotently from local input. Keep the pipe input out of version control:
+
+```bash
+AIRFLOW_METADATA_URI=$(
+  PG_USER="$PG_USER" PG_PASSWORD="$PG_PASSWORD" AIRFLOW_DB_HOST="$AIRFLOW_DB_HOST" \
+  python3 -c \
+  'import os; from urllib.parse import quote; print("postgresql+psycopg2://" + quote(os.environ["PG_USER"], safe="") + ":" + quote(os.environ["PG_PASSWORD"], safe="") + "@" + os.environ["AIRFLOW_DB_HOST"] + ":5432/airflow_db?sslmode=require")'
+)
+kubectl create secret generic airflow-metadata \
+  --namespace "$NAMESPACE" \
+  --from-literal=connection="$AIRFLOW_METADATA_URI" \
+  --dry-run=client -o yaml |
+  $SSH_CMD "kubectl apply -f -"
+unset AIRFLOW_METADATA_URI
+
+kubectl create secret generic postgres-demo-merge \
+  --namespace "$NAMESPACE" \
+  --from-literal=USER="$PG_USER" \
+  --from-literal=PASSWORD="$PG_PASSWORD" \
+  --dry-run=client -o yaml |
+  $SSH_CMD "kubectl apply -f -"
+
+kubectl create secret generic git \
+  --namespace "$NAMESPACE" \
+  --from-literal=TOKEN="$GITHUB_MODEL_PULL_TOKEN" \
+  --dry-run=client -o yaml |
+  $SSH_CMD "kubectl apply -f -"
+
+kubectl create secret generic git-dags \
+  --namespace "$NAMESPACE" \
+  --from-literal=GIT_SYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GIT_SYNC_PASSWORD="$GITHUB_DAG_PULL_TOKEN" \
+  --from-literal=GITSYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GITSYNC_PASSWORD="$GITHUB_DAG_PULL_TOKEN" \
+  --dry-run=client -o yaml |
+  $SSH_CMD "kubectl apply -f -"
+
+kubectl create secret docker-registry datasurface-registry \
+  --namespace "$NAMESPACE" \
   --docker-server=registry.gitlab.com \
-  --docker-username=$GITLAB_CUSTOMER_USER \
-  --docker-password=$GITLAB_CUSTOMER_TOKEN \
-  -n $NAMESPACE"
-
-# Attach image pull secret to default service account
-$SSH_CMD "kubectl patch serviceaccount default -n $NAMESPACE \
-  -p '{\"imagePullSecrets\": [{\"name\": \"datasurface-registry\"}]}'"
+  --docker-username="$GITLAB_CUSTOMER_USER" \
+  --docker-password="$GITLAB_CUSTOMER_TOKEN" \
+  --dry-run=client -o yaml |
+  $SSH_CMD "kubectl apply -f -"
 ```
 
-**Checkpoint:** `$SSH_CMD "kubectl get secrets -n $NAMESPACE"` shows all 5 secrets:
-- postgres
-- postgres-demo-merge
-- git
-- git-dags
-- datasurface-registry
-
----
-
-## Step 6: Install Airflow via Helm
-
-Copy the values file to the remote host, then install:
+Patch the default service account:
 
 ```bash
-$SCP_CMD helm/airflow-values.yaml $SSH_USER@$SSH_HOST:/tmp/airflow-values.yaml
-
-$SSH_CMD "helm repo add apache-airflow https://airflow.apache.org && helm repo update"
-
-$SSH_CMD "helm install airflow apache-airflow/airflow \
-  -f /tmp/airflow-values.yaml \
-  -n $NAMESPACE \
-  --timeout 10m"
+$SSH_CMD "kubectl patch serviceaccount default -n '$NAMESPACE' \
+  -p '{\"imagePullSecrets\":[{\"name\":\"datasurface-registry\"}]}'"
 ```
 
-**Checkpoint:** `$SSH_CMD "kubectl get pods -n $NAMESPACE"` — all Airflow pods should reach Running state:
-- airflow-api-server
-- airflow-scheduler
-- airflow-dag-processor
-- airflow-triggerer
-- airflow-worker
-- airflow-redis
-- airflow-statsd
-
-**Note:** If the DAG repository was not initialized before this step (Step 3), the git-sync init containers will fail with `couldn't find remote ref main` and pods will be stuck in `Init:Error`.
-
----
-
-## Step 6a: Create RBAC for Airflow Secret Access
-
-**CRITICAL: The infrastructure DAG needs to read Kubernetes secrets. Without this, DAGs will fail to import.**
+Verify names and keys only:
 
 ```bash
-$SSH_CMD 'cat <<EOF | kubectl apply -f -
+$SSH_CMD "kubectl get secrets -n '$NAMESPACE'"
+$SSH_CMD "kubectl describe secret airflow-metadata -n '$NAMESPACE'"
+$SSH_CMD "kubectl describe secret postgres-demo-merge -n '$NAMESPACE'"
+```
+
+Use `create-k8-credential` for additional datastore credentials.
+
+## 7. Install Airflow
+
+Copy the temporary values and install:
+
+```bash
+$SCP_CMD "$REMOTE_AIRFLOW_VALUES" \
+  "$SSH_USER@$SSH_HOST:/tmp/demo1-airflow-values.yaml"
+
+$SSH_CMD "helm repo add apache-airflow https://airflow.apache.org &&
+  helm repo update apache-airflow &&
+  helm upgrade --install airflow apache-airflow/airflow \
+    --namespace '$NAMESPACE' \
+    --values /tmp/demo1-airflow-values.yaml \
+    --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
+    --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
+    --reset-values --timeout 20m --wait"
+```
+
+Airflow 3 uses `airflow-api-server` and `airflow-dag-processor`; do not wait for an Airflow 2
+webserver deployment.
+
+Grant the Airflow component service accounts read-only access to namespace-local runtime Secrets:
+
+```bash
+cat <<YAML | $SSH_CMD "kubectl apply -f -"
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: airflow-secret-reader
-  namespace: $NAMESPACE
+  namespace: ${NAMESPACE}
 rules:
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: airflow-secret-reader-binding
-  namespace: $NAMESPACE
+  name: airflow-secret-reader
+  namespace: ${NAMESPACE}
 subjects:
-- kind: ServiceAccount
-  name: airflow-dag-processor
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-worker
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-scheduler
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-triggerer
-  namespace: $NAMESPACE
+  - {kind: ServiceAccount, name: airflow-dag-processor, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
 roleRef:
+  apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: airflow-secret-reader
-  apiGroup: rbac.authorization.k8s.io
-EOF'
+YAML
 ```
 
-**Checkpoint:** `$SSH_CMD "kubectl get role,rolebinding -n $NAMESPACE"` shows:
-- role.rbac.authorization.k8s.io/airflow-secret-reader
-- rolebinding.rbac.authorization.k8s.io/airflow-secret-reader-binding
-
----
-
-## Step 7: Deploy Bootstrap and Run Jobs
-
-Copy the generated YAML files to the remote host:
+## 8. Apply bootstrap and run ring 1
 
 ```bash
-$SCP_CMD generated_output/Demo_PSP/*.yaml $SSH_USER@$SSH_HOST:/tmp/
-```
+$SCP_CMD generated_output/Demo_PSP/*.yaml \
+  "$SSH_USER@$SSH_HOST:/tmp/"
 
-### 7a. Apply Kubernetes bootstrap
-
-```bash
 $SSH_CMD "kubectl apply -f /tmp/kubernetes-bootstrap.yaml"
+$SSH_CMD "kubectl rollout status deployment/demo-psp-mcp-server \
+  -n '$NAMESPACE' --timeout=300s"
+
+$SSH_CMD "kubectl delete job demo-psp-ring1-init \
+  -n '$NAMESPACE' --ignore-not-found --wait=true"
+$SSH_CMD "kubectl apply -f /tmp/demo_psp_ring1_init_job.yaml"
+$SSH_CMD "kubectl wait --for=condition=complete \
+  job/demo-psp-ring1-init -n '$NAMESPACE' --timeout=300s"
+$SSH_CMD "kubectl logs job/demo-psp-ring1-init \
+  -n '$NAMESPACE' --all-containers --tail=100"
 ```
 
-This creates:
-- git-cache-pvc (PersistentVolumeClaim)
-- logging ConfigMap
-- NetworkPolicy
-- MCP server Deployment and Service
+Do not apply a model-merge Job; the file no longer exists.
 
-### 7b. Run jobs sequentially
-
-**IMPORTANT:** Jobs must run sequentially. The ring1-init job creates database tables that model-merge depends on.
+## 9. Trigger infrastructure/model merge
 
 ```bash
-# Delete any existing jobs
-$SSH_CMD "kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job \
-  -n $NAMESPACE --ignore-not-found"
+$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json"
 
-# Run ring1-init (creates tables)
-$SSH_CMD "kubectl apply -f /tmp/demo_psp_ring1_init_job.yaml && \
-  kubectl wait --for=condition=complete --timeout=180s \
-  job/demo-psp-ring1-init -n $NAMESPACE"
+$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger demo-psp_infrastructure"
 
-# Run model-merge (populates DAG configurations)
-$SSH_CMD "kubectl apply -f /tmp/demo_psp_model_merge_job.yaml && \
-  kubectl wait --for=condition=complete --timeout=180s \
-  job/demo-psp-model-merge-job -n $NAMESPACE"
+$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json"
 ```
 
-**Checkpoint:**
+Wait for the new run to succeed, then discover the generated DAG IDs with `airflow dags list`.
+
+## 10. Verify and access
 
 ```bash
-$SSH_CMD "kubectl get jobs -n $NAMESPACE"
+$SSH_CMD "kubectl get pods,jobs,pvc -n '$NAMESPACE' -o wide"
+$SSH_CMD "kubectl get events -n '$NAMESPACE' \
+  --field-selector type=Warning --sort-by=.lastTimestamp"
+$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version"
 ```
 
-Both jobs should show `Complete` with `1/1` completions.
+Require Airflow 3.3.x, Ready core pods, a bound RWX Git-cache PVC, a completed ring-1 Job, no DAG
+import errors, and a successful infrastructure run.
 
-Check logs for success messages:
+Access the UI through an SSH tunnel:
 
 ```bash
-# Should end with "Ring 1 initialization complete"
-$SSH_CMD "kubectl logs job/demo-psp-ring1-init -n $NAMESPACE | tail -3"
-
-# Should show config_count > 0 and "Model merge handler complete"
-$SSH_CMD "kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE | tail -10"
+$SSH_CMD "kubectl port-forward -n '$NAMESPACE' \
+  svc/airflow-api-server 8080:8080"
 ```
 
-**Key success indicators in model-merge logs:**
-- `"Populated factory DAG configurations"` with `config_count: 2` (or more)
-- `"Populated CQRS DAG configurations"` with `config_count: 1` (or more)
-- `"Populated DC reconcile DAG configurations"` with `config_count: 1` (or more)
-- No ERROR level messages (WARNING about event publishing is normal)
-
----
-
-## Step 8: Verify Deployment
-
-### 8a. Check pods and jobs
+In a separate local terminal:
 
 ```bash
-$SSH_CMD "kubectl get pods -n $NAMESPACE"
-$SSH_CMD "kubectl get jobs -n $NAMESPACE"
+ssh -i "$SSH_KEY" -L 8080:localhost:8080 "$SSH_USER@$SSH_HOST"
 ```
 
-Expected: All airflow pods Running, MCP server Running, both jobs Complete.
-
-### 8b. Verify database tables
-
-```bash
-PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -d merge_db -c "\dt"
-```
-
-Expected tables:
-- `demo_psp_factory_dags`
-- `demo_psp_cqrs_dags`
-- `demo_psp_dc_reconcile_dags`
-- `scd4_airflow_dsg`
-- `scd4_airflow_datatransformer`
-
-### 8c. Verify DAGs are registered
-
-Wait 60-90 seconds for git-sync, then:
-
-```bash
-$SSH_CMD 'kubectl exec -n $NAMESPACE deployment/airflow-dag-processor \
-  -c dag-processor -- airflow dags list 2>&1 | \
-  grep -v "DeprecationWarning\|RemovedInAirflow\|permissions.py"'
-```
-
-Expected DAGs (5 total):
-
-| DAG ID | Description |
-|--------|-------------|
-| `scd4_factory_dag` | Factory DAG for SCD4 pipelines |
-| `Demo_PSP_K8sMergeDB_reconcile` | DataContainer reconciliation |
-| `Demo_PSP_default_K8sMergeDB_cqrs` | CQRS DAG |
-| `demo-psp_infrastructure` | Infrastructure management |
-| `scd4_datatransformer_factory` | DataTransformer factory |
-
-### 8d. Check for import errors
-
-```bash
-$SSH_CMD 'kubectl exec -n $NAMESPACE deployment/airflow-dag-processor \
-  -c dag-processor -- airflow dags list-import-errors'
-```
-
-Should return no errors.
-
----
-
-## Step 9: Access Airflow UI
-
-Use SSH port forwarding to access the Airflow UI from your local browser:
-
-```bash
-ssh -i $SSH_KEY -L 8080:localhost:8080 $SSH_USER@$SSH_HOST \
-  "kubectl port-forward svc/airflow-api-server 8080:8080 -n $NAMESPACE"
-```
-
-Open http://localhost:8080:
-- Username: `admin`
-- Password: `admin`
-
----
-
-## Troubleshooting Quick Reference
-
-### CoreDNS: Pods can't resolve database hostnames
-
-Symptoms: Jobs or pods fail with "could not translate host name" errors.
-
-```bash
-# Check CoreDNS config has hosts entries with FQDN aliases
-$SSH_CMD "kubectl get configmap coredns -n kube-system -o yaml"
-
-# Verify from a test pod (ignore NXDOMAIN for non-matching search domains)
-$SSH_CMD "kubectl run dns-test --rm -it --restart=Never --image=busybox -- nslookup <hostname>"
-
-# Restart CoreDNS if config was recently changed
-$SSH_CMD "kubectl rollout restart deployment coredns -n kube-system"
-```
-
-### Git-sync init containers fail (Init:Error)
-
-Symptoms: Airflow pods stuck in `Init:Error` or `Init:CrashLoopBackOff`.
-
-```bash
-$SSH_CMD "kubectl logs -n $NAMESPACE <pod-name> -c git-sync-init"
-```
-
-Common cause: The DAG repository is empty or missing the `main` branch. **Solution:** Initialize the DAG repository (Step 3) before installing Airflow.
-
-### PVC Multi-Attach error
-
-Symptoms: Jobs stuck in `ContainerCreating` with `Multi-Attach error for volume`.
-
-```bash
-$SSH_CMD "kubectl describe pod <pod-name> -n $NAMESPACE | tail -10"
-```
-
-**Root cause:** The git-cache PVC was created with `ReadWriteOnce` but is shared between the MCP server and batch jobs.
-
-**Fix:** Recreate the PVC with `ReadWriteMany`:
-
-```bash
-# Scale down MCP server and delete jobs using the PVC
-$SSH_CMD "kubectl scale deployment demo-psp-mcp-server -n $NAMESPACE --replicas=0"
-$SSH_CMD "kubectl delete jobs --all -n $NAMESPACE"
-
-# Wait for pods to terminate, then delete and recreate PVC
-$SSH_CMD "kubectl delete pvc git-cache-pvc -n $NAMESPACE"
-
-# If PVC stuck in Terminating:
-$SSH_CMD "kubectl patch pvc git-cache-pvc -n $NAMESPACE \
-  -p '{\"metadata\":{\"finalizers\":null}}'"
-
-# Recreate with ReadWriteMany
-$SSH_CMD 'cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: git-cache-pvc
-  namespace: $NAMESPACE
-spec:
-  accessModes:
-  - ReadWriteMany
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: <storage-class>
-EOF'
-
-# Scale MCP server back up
-$SSH_CMD "kubectl scale deployment demo-psp-mcp-server -n $NAMESPACE --replicas=1"
-```
-
-**Prevention:** Set `access_mode="ReadWriteMany"` in `rte_demo.py` GitCacheConfig before generating bootstrap.
-
-### Namespace stuck in Terminating
-
-```bash
-$SSH_CMD "kubectl get namespace $NAMESPACE -o json | \
-  jq '.spec.finalizers = []' | \
-  kubectl replace --raw \"/api/v1/namespaces/$NAMESPACE/finalize\" -f -"
-```
-
-### ImagePullBackOff
-
-```bash
-$SSH_CMD "kubectl get secret datasurface-registry -n $NAMESPACE"
-$SSH_CMD "kubectl get sa default -n $NAMESPACE -o yaml | grep imagePullSecrets"
-```
-
-### Job failures
-
-```bash
-$SSH_CMD "kubectl logs job/demo-psp-ring1-init -n $NAMESPACE"
-$SSH_CMD "kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE"
-```
-
-### DAG import errors (Forbidden / secrets access)
-
-```bash
-$SSH_CMD 'kubectl exec -n $NAMESPACE deployment/airflow-dag-processor \
-  -c dag-processor -- airflow dags list-import-errors'
-
-# Check RBAC exists
-$SSH_CMD "kubectl get role,rolebinding -n $NAMESPACE | grep airflow-secret"
-
-# If missing, create RBAC (Step 6a) then restart dag-processor:
-$SSH_CMD "kubectl rollout restart deployment/airflow-dag-processor -n $NAMESPACE"
-```
-
----
-
-## Key Differences from Local (Docker Desktop) Setup
-
-| Aspect | Local Setup | Remote Setup |
-|--------|------------|--------------|
-| Kubernetes access | Direct `kubectl` | Via SSH to master node |
-| Database hosts | `host.docker.internal` | External hostnames (e.g., Tailscale) |
-| Database DNS | Automatic | Requires CoreDNS `hosts` entries with FQDN aliases |
-| Storage class | `standard` or `hostpath` | `longhorn` (or cluster-specific) |
-| Git cache PVC | `ReadWriteOnce` (single-node) | `ReadWriteMany` (multi-node, shared access) |
-| File transfer | Direct paths | SCP files to remote host |
-| PostgreSQL reset | `docker compose down -v` | `DROP DATABASE` / `CREATE DATABASE` via psql |
-| Airflow UI access | `kubectl port-forward` | SSH tunnel + `kubectl port-forward` |
-| DAG repo timing | Can initialize after Airflow install | **Must initialize before Airflow install** (git-sync init fails on empty repo) |
-
----
-
-## Post-Setup: Pre-Pull Images on Cluster Nodes (Recommended)
-
-Pre-pulling the DataSurface image on worker nodes avoids slow image pulls during job execution and prevents registry rate limits:
-
-```bash
-# Pull using ctr with explicit credentials on each node
-for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
-  echo "Pulling on $node..."
-  $SSH_CMD "ssh $node 'sudo ctr -n k8s.io images pull \
-    registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-    --user ${GITLAB_CUSTOMER_USER}:${GITLAB_CUSTOMER_TOKEN}'"
-done
-
-# Verify image is available on each node
-for node in $($SSH_CMD "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'"); do
-  echo "=== $node ==="
-  $SSH_CMD "ssh $node 'sudo crictl images | grep datasurface'"
-done
-```
-
----
-
-## Post-Setup: Verify Cleanup is Active
-
-The Helm values include automatic cleanup that prevents the Airflow metadata DB and logs volume from growing unbounded:
-
-- **Log groomer sidecars** (`retentionDays: 2`) on each worker, scheduler, triggerer, and dag-processor automatically delete log files older than 2 days
-- **Cleanup CronJob** (`airflow-cleanup`, every 30 minutes) purges old `dag_run`, `task_instance`, and other metadata tables older than 2 days
-- **Pod cleanup** removes completed/failed K8s pods from the namespace
-
-Verify both are active after helm install:
-
-```bash
-# Check the cleanup CronJob exists
-$SSH_CMD "kubectl get cronjobs -n $NAMESPACE"
-
-# Trigger a manual run to verify it works
-$SSH_CMD "kubectl create job --from=cronjob/airflow-cleanup airflow-cleanup-test -n $NAMESPACE"
-$SSH_CMD "kubectl logs job/airflow-cleanup-test -n $NAMESPACE"
-$SSH_CMD "kubectl delete job airflow-cleanup-test -n $NAMESPACE"
-
-# Check log groomer is running in worker sidecars
-$SSH_CMD "kubectl logs airflow-worker-0 -c worker-log-groomer -n $NAMESPACE --tail=5"
-```
-
-**Symptoms of missing cleanup (if these appear, verify cleanup is active):**
-- Worker logs show: `OSError: [Errno 28] No space left on device` (logs volume full or inodes exhausted)
-- Scheduler logs show: `executor_state=failed` for tasks that never started
-- All DAGs fail simultaneously
-- `df -hi` on logs volume shows 100% inode usage even with space available
-
----
-
-## Post-Setup: MCP Server Access
-
-The bootstrap artifacts include an MCP server deployment that allows AI assistants to query the DataSurface model.
-
-### Check MCP server status
-
-```bash
-$SSH_CMD "kubectl get pods -n $NAMESPACE -l app=demo-psp-mcp-server"
-$SSH_CMD "kubectl get svc -n $NAMESPACE | grep mcp"
-```
-
-### Access MCP server via SSH tunnel
-
-```bash
-# Get the MCP service NodePort
-$SSH_CMD "kubectl get svc demo-psp-mcp -n $NAMESPACE -o jsonpath='{.spec.ports[0].nodePort}'"
-
-# Or port-forward
-ssh -i $SSH_KEY -L 8000:localhost:8000 $SSH_USER@$SSH_HOST \
-  "kubectl port-forward svc/demo-psp-mcp 8000:8000 -n $NAMESPACE"
-```
-
-The MCP server is accessible at `http://localhost:8000/sse`
-
-### Configure Claude Code or Cursor IDE
-
-Add to `.mcp.json` or Cursor MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "datasurface": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `list_object_types` | List queryable object types |
-| `list_objects` | List all objects of a type |
-| `read_object` | Get full JSON for an object |
-| `search_model` | Search across model objects |
-| `get_lineage` | Get data lineage for a datastore |
-| `list_all_repositories` | List all git repos used by model |
-
----
-
-## Updating After Code Changes
-
-### Regenerate and redeploy DAGs
-
-```bash
-# Pull latest DataSurface image locally
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-# Regenerate artifacts
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
-
-# Update DAG in airflow repo
-cp generated_output/Demo_PSP/demo_psp_infrastructure_dag.py /tmp/<airflow-repo>/dags/
-cd /tmp/<airflow-repo>
-git add dags/ && git commit -m "Update infrastructure DAG" && git push
-```
-
-Git-sync will pick up the change within 60 seconds.
-
-### Re-run jobs after schema changes
-
-`createOrUpdateTable` will not perform breaking schema changes. If table schemas have changed, drop tables first:
-
-```bash
-# Drop tables on the merge DB
-PGPASSWORD=$PG_PASSWORD psql -h $MERGE_DB_HOST -U $PG_USER -d merge_db -c "
-  DROP TABLE IF EXISTS demo_psp_factory_dags, demo_psp_cqrs_dags,
-    demo_psp_dc_reconcile_dags, scd4_airflow_dsg, scd4_airflow_datatransformer;
-"
-
-# Copy updated job YAMLs to remote
-$SCP_CMD generated_output/Demo_PSP/*.yaml $SSH_USER@$SSH_HOST:/tmp/
-
-# Delete old jobs and re-run
-$SSH_CMD "kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job \
-  -n $NAMESPACE --ignore-not-found"
-
-$SSH_CMD "kubectl apply -f /tmp/demo_psp_ring1_init_job.yaml && \
-  kubectl wait --for=condition=complete --timeout=180s \
-  job/demo-psp-ring1-init -n $NAMESPACE"
-
-$SSH_CMD "kubectl apply -f /tmp/demo_psp_model_merge_job.yaml && \
-  kubectl wait --for=condition=complete --timeout=180s \
-  job/demo-psp-model-merge-job -n $NAMESPACE"
-```
-
-### Clear git cache
-
-If model changes aren't being picked up despite new git tags (the git cache is quantized to 5-minute intervals):
-
-```bash
-$SSH_CMD "kubectl run cache-clear --rm -i --restart=Never \
-  --image=busybox \
-  -n $NAMESPACE \
-  --overrides='{\"spec\":{\"containers\":[{\"name\":\"cache-clear\",\"image\":\"busybox\",\"command\":[\"sh\",\"-c\",\"rm -rf /cache/*\"],\"volumeMounts\":[{\"name\":\"git-cache\",\"mountPath\":\"/cache\"}]}],\"volumes\":[{\"name\":\"git-cache\",\"persistentVolumeClaim\":{\"claimName\":\"git-cache-pvc\"}}]}}' \
-  -- sh -c 'rm -rf /cache/* && echo Cache cleared'"
-```
-
----
-
-## Additional Troubleshooting
-
-### Logs volume full (all jobs suddenly failing)
-
-```bash
-# Check logs volume usage (both space AND inodes)
-$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- df -h /opt/airflow/logs"
-$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- df -hi /opt/airflow/logs"
-
-# Emergency cleanup: delete log directories older than 6 hours
-$SSH_CMD "kubectl exec airflow-worker-0 -n $NAMESPACE -c worker -- \
-  bash -c 'find /opt/airflow/logs -mindepth 2 -maxdepth 2 -type d -mmin +360 | xargs rm -rf'"
-
-# Verify the helm cleanup CronJob is running (should exist from helm install)
-$SSH_CMD "kubectl get cronjobs -n $NAMESPACE"
-
-# If missing, ensure cleanup.enabled is true in helm values and run helm upgrade
-```
-
-**Note:** Inode exhaustion (`df -hi` shows 100%) causes the same symptoms as disk full even when `df -h` shows space available. With many DAGs on frequent schedules, each run creates directories that consume inodes rapidly.
-
-### Schema changes not taking effect
-
-`createOrUpdateTable` is non-destructive — it won't drop columns or change types. You must drop the affected tables manually and re-run ring1-init + model-merge. See "Re-run jobs after schema changes" above.
-
-### Pods stuck in ContainerCreating (volume mount errors)
-
-Check if `nfs-common` is installed on the node where the pod is scheduled:
-
-```bash
-# Find which node the pod is on
-$SSH_CMD "kubectl get pod <pod-name> -n $NAMESPACE -o jsonpath='{.spec.nodeName}'"
-
-# Check nfs-common on that node
-$SSH_CMD "ssh <node-name> 'dpkg -l | grep nfs-common'"
-
-# If missing:
-$SSH_CMD "ssh <node-name> 'sudo apt-get update && sudo apt-get install -y nfs-common'"
-```
-
-### Monitoring cluster resource usage
-
-```bash
-# Node resource usage
-$SSH_CMD "kubectl top nodes"
-
-# Pod resource usage (sorted by CPU)
-$SSH_CMD "kubectl top pods -n $NAMESPACE --sort-by=cpu"
-
-# Check Airflow worker memory
-$SSH_CMD "kubectl top pods -n $NAMESPACE -l component=worker"
-```
+Use `troubleshoot-k8s-jobs` for Job/pod failures and `troubleshoot-airflow` for DAG/task failures.
+Do not force-delete PVC finalizers or namespaces during troubleshooting.

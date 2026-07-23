@@ -1,577 +1,409 @@
 ---
-name: DataSurface Setup Walkthrough
-description: Interactive walkthrough for setting up a DataSurface Yellow environment on Docker Desktop. Use this skill to guide users through the complete installation process step-by-step.
+name: setup-walkthrough
+description: Set up the demo1 DataSurface Yellow SCD4 environment on Docker Desktop Kubernetes with Airflow 3.3, local Kubernetes Secrets, and the generated infrastructure DAG. Use for a new or rebuilt local demo1 environment.
 ---
 
-# DataSurface Setup Walkthrough
+# Local DataSurface setup walkthrough
 
-This skill guides you through setting up a DataSurface Yellow environment on Docker Desktop with Kubernetes. Follow each step in order and verify completion before proceeding.
+This is the current Docker Desktop path for the `demo1` model. It uses:
 
-## IMPORTANT: Execution Rules
+- DataSurface `1.8.4`;
+- Airflow `3.3.0`;
+- SCD4 platform `Demo_PSP`;
+- Docker Compose PostgreSQL for Airflow metadata and the merge database;
+- direct namespace-local Kubernetes Secrets;
+- ring 1 bootstrap followed by model merge through `demo-psp_infrastructure`.
 
-1. **Execute steps sequentially** - Do not skip ahead or combine steps
-2. **Verify each step** - Confirm success before proceeding to the next step
-3. **Ask for missing information** - If environment variables or credentials are not provided, ask the user
-4. **Report failures immediately** - If any step fails, stop and troubleshoot before continuing
+There is no standalone model-merge Job in current bootstrap output. The infrastructure DAG owns
+the split plan → publish flow (and plan → ESO reconcile → publish on cloud assemblies).
 
-## Pre-Flight Checklist
+## Execution rules
 
-Before starting, verify the user has:
+1. Run and verify each phase in order.
+2. Do not delete a namespace, database volume, Git tag, or release unless the user asked for a
+   clean rebuild and the exact target was verified.
+3. Keep credential values out of Git and command output.
+4. Resolve generated filenames from `generated_output/Demo_PSP`; do not invent legacy names.
+5. Use the repo virtual environment for model validation.
 
-- [ ] Docker Desktop running with Kubernetes enabled
-- [ ] `kubectl` CLI installed and configured
-- [ ] `helm` CLI installed
-- [ ] GitHub Personal Access Token (needs repo access)
-- [ ] GitLab credentials for DataSurface images
-
-Ask the user for these environment variables if not already set:
+## Preflight
 
 ```bash
-NAMESPACE          # Kubernetes namespace (default: demo1)
-GITHUB_USERNAME    # GitHub username
-GITHUB_TOKEN       # GitHub Personal Access Token
-GITLAB_CUSTOMER_USER   # GitLab deploy token username
-GITLAB_CUSTOMER_TOKEN  # GitLab deploy token
-DATASURFACE_VERSION    # DataSurface version (default: 1.1.0)
+NAMESPACE=${NAMESPACE:-demo1}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.8.4}
+MODEL_REPO=<owner/model-repo>
+AIRFLOW_REPO=<owner/dag-repo>
+GITHUB_USERNAME=<github-user>
+
+docker version
+kubectl config current-context
+kubectl get nodes
+helm version
+git status --short
 ```
 
-Also ask for the target repository names:
+Require:
 
-- **Model repository**: Where the customized model will be pushed (e.g., `yourorg/demo1_actual`)
-- **Airflow DAG repository**: Where DAGs will be synced from (e.g., `yourorg/demo1_airflow`)
+- Docker Desktop Kubernetes;
+- `kubectl`, `helm`, `git`, `jq`, and `python3`;
+- a GitHub token with read/write access to the model and DAG repositories;
+- GitLab registry credentials that can pull DataSurface images.
 
-**Detect the Kubernetes storage class** (varies between Docker Desktop installations):
+Set `POSTGRES_PASSWORD` to the password used by `docker/postgres/docker-compose.yml` (the checked-in
+local default is `password`). Do not echo it.
+
+Discover a shared storage class:
 
 ```bash
 kubectl get storageclass
 ```
 
-Common values:
+Current DataSurface git cache lint requires `ReadWriteMany`. Select a Docker Desktop storage class
+that supports RWX and use it consistently in `rte_demo.py` and the Airflow values. The checked-in
+starter uses `standard` for the git cache and `hostpath` for logs; adjust those names if the local
+cluster differs.
 
-- `standard` (some Docker Desktop versions)
-- `hostpath` (other Docker Desktop versions)
+## 1. Optional clean rebuild
 
-Save this value - you'll need it in Step 2.
-
----
-
-## Step 0: Clean Up Previous Installation
-
-**IMPORTANT: Always run this step, even for "fresh" installations.** Docker volumes persist across container deletions, so old Airflow DAG run history and merge data can survive even after removing containers. This causes scheduling issues where the scheduler sees stale runs.
-
-### 0a. Clean up Kubernetes namespace (if exists)
+Skip this phase for an in-place update. For a clean rebuild, verify targets first:
 
 ```bash
-# Check for existing namespace
-kubectl get namespace $NAMESPACE
+helm list -n "$NAMESPACE"
+kubectl get namespace "$NAMESPACE"
+docker compose -f docker/postgres/docker-compose.yml ps
 ```
 
-If the namespace exists:
+Then, only with clean-rebuild authorization:
 
 ```bash
-# Uninstall Airflow
-helm uninstall airflow -n $NAMESPACE
-
-# Delete namespace
-kubectl delete namespace $NAMESPACE
-
-# If namespace is stuck in Terminating state (wait 30 seconds, then check):
-kubectl get namespace $NAMESPACE -o json | jq '.spec.finalizers = []' | \
-  kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f -
+helm uninstall airflow -n "$NAMESPACE" --ignore-not-found
+kubectl delete namespace "$NAMESPACE" --wait=true
+docker compose -f docker/postgres/docker-compose.yml down -v
 ```
 
-### 0b. Reset PostgreSQL (MANDATORY)
+The `-v` operation deletes Airflow metadata and merge data. It is intentionally absent from an
+ordinary upgrade.
 
-**Always reset the databases to ensure clean state.** Even if you deleted the container, the Docker volume persists with old data.
+## 2. Start PostgreSQL
 
 ```bash
-cd docker/postgres
-docker compose down -v
+docker compose -f docker/postgres/docker-compose.yml up -d
+docker compose -f docker/postgres/docker-compose.yml ps
 ```
 
-The `-v` flag removes the named volume (`datasurface-postgres-data`), ensuring all old Airflow metadata, DAG run history, and merge data are deleted.
-
-**Checkpoint:**
-- `kubectl get namespace $NAMESPACE` should return "not found"
-- `docker volume ls | grep datasurface-postgres` should return nothing
-
----
-
-## Step 1: Start PostgreSQL
+Verify both databases from the compose README/config:
 
 ```bash
-cd docker/postgres
-
-# Verify no stale volume exists (should return nothing)
-docker volume ls | grep datasurface-postgres
-
-# Start fresh PostgreSQL
-docker compose up -d
+docker exec datasurface-postgres \
+  psql -U postgres -At -c \
+  "SELECT datname FROM pg_database WHERE datname IN ('airflow_db','merge_db') ORDER BY datname;"
 ```
 
-**Checkpoint:**
-- `docker ps | grep datasurface-postgres` - container should be running
-- `docker volume ls | grep datasurface-postgres` - should show exactly one volume (newly created)
+## 3. Configure and validate the model
 
----
+Update:
 
-## Step 2: Customize the Model
+- `eco.py`: `GIT_REPO_OWNER`, `GIT_REPO_NAME`;
+- `rte_demo.py`: namespace, RWX storage class, merge endpoint, and image tag;
+- `helm/airflow-values.yaml`: DAG repository URL and local storage classes.
 
-Edit three files to configure for the user's environment:
-
-### 2a. Edit `eco.py`
-
-Update the repository owner and name:
+The checked-in baseline is:
 
 ```python
-GIT_REPO_OWNER: str = "<user's github org or username>"
-GIT_REPO_NAME: str = "<model repo name, e.g., demo1_actual>"
+DATASURFACE_VERSION = "1.8.4"
 ```
 
-### 2b. Edit `helm/airflow-values.yaml`
+and:
 
-Update the DAG sync repository URL:
-
-```yaml
-dags:
-  gitSync:
-    repo: https://github.com/<org>/<airflow-repo>.git
+```text
+registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4
 ```
 
-**Also update the storage class** if not `standard` (check all `storageClassName` entries):
+Validate before publishing:
 
-```yaml
-redis:
-  persistence:
-    storageClassName: <storage-class>  # e.g., hostpath
-
-workers:
-  persistence:
-    storageClassName: <storage-class>
+```bash
+.venv/bin/python -m unittest test_loads
 ```
 
-### 2c. Edit `rte_demo.py`
+This uses the demo1 `.venv` created from `requirements.txt` (no extra test dependencies
+required); a successful run prints `Ecosystem validated OK`.
 
-Confirm the Docker image uses the correct version:
+## 4. Publish a stable model release
 
-```python
-datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.1.0",
+`VersionPatternReleaseSelector(..., STABLE_ONLY)` reads GitHub Releases matching
+`vN.N.N-demo`; a tag by itself is insufficient.
+
+```bash
+git remote set-url origin "https://github.com/${MODEL_REPO}.git"
+git add eco.py rte_demo.py helm/airflow-values.yaml requirements.txt
+git commit -m "Configure local DataSurface environment"
+git push -u origin main
+
+git fetch --tags
+git tag -l 'v*-demo' | sort -V | tail -5
+MODEL_TAG=<next-vN.N.N-demo>
+git tag -a "$MODEL_TAG" -m "$MODEL_TAG"
+git push origin "$MODEL_TAG"
 ```
 
-**Also update the storage class** if not `standard`:
+Create a non-draft, non-prerelease GitHub Release for that tag. Use `gh release create` when the
+authenticated CLI is available; otherwise use GitHub's Releases UI. Never delete older releases
+merely to make the new release win—publish a monotonically newer matching release.
 
-```python
-pv_storage_class="<storage-class>",  # e.g., "hostpath"
-```
+## 5. Create namespace and administrator-managed Secrets
 
-And in `git_config`:
+Use the `create-k8-credential` skill for canonical keys and safe rotation.
 
-```python
-git_config: GitCacheConfig = GitCacheConfig(
-    enabled=True,
-    access_mode="ReadWriteOnce",
-    storageClass="<storage-class>"  # e.g., "hostpath"
+```bash
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml |
+  kubectl apply -f -
+
+AIRFLOW_METADATA_URI=$(
+  POSTGRES_PASSWORD="$POSTGRES_PASSWORD" python3 -c \
+  'import os; from urllib.parse import quote; print("postgresql+psycopg2://postgres:" + quote(os.environ["POSTGRES_PASSWORD"], safe="") + "@host.docker.internal:5432/airflow_db?sslmode=disable")'
 )
-```
+kubectl create secret generic airflow-metadata \
+  --namespace "$NAMESPACE" \
+  --from-literal=connection="$AIRFLOW_METADATA_URI" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
+unset AIRFLOW_METADATA_URI
 
-**Checkpoint:** All files have been edited with the user's values, including correct storage class
-
----
-
-## Step 3: Push Customized Model to Repository
-
-**CRITICAL: Do not skip this step. The model MUST be pushed AND tagged for DataSurface to pick it up.**
-
-```bash
-# Change remote to target repository
-git remote set-url origin https://github.com/<org>/<model-repo>.git
-
-# Stage and commit changes
-git add eco.py helm/airflow-values.yaml rte_demo.py
-git commit -m "Customize model for environment"
-
-# Push to the model repository (force if replacing existing)
-git push -u origin main --force
-
-# Tag the commit for DataSurface to recognize it
-git tag v1.0.0-demo
-git push origin v1.0.0-demo
-```
-
-**Checkpoint:**
-
-- Run `git remote -v` - should show the target model repository
-- Run `git log -1` - should show the customize commit
-- Run `git tag` - should show `v1.0.0-demo`
-- Verify on GitHub that the repository has the updated files AND the tag exists
-
----
-
-## Step 4: Create Kubernetes Namespace and Secrets
-
-```bash
-# Create namespace
-kubectl create namespace $NAMESPACE
-
-# PostgreSQL credentials (for Airflow metadata)
-kubectl create secret generic postgres \
-  --from-literal=USER=postgres \
-  --from-literal=PASSWORD=password \
-  -n $NAMESPACE
-
-# PostgreSQL credentials for merge database
 kubectl create secret generic postgres-demo-merge \
+  --namespace "$NAMESPACE" \
   --from-literal=USER=postgres \
-  --from-literal=PASSWORD=password \
-  -n $NAMESPACE
+  --from-literal=PASSWORD="$POSTGRES_PASSWORD" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# Git credentials for model repository
 kubectl create secret generic git \
-  --from-literal=TOKEN=$GITHUB_TOKEN \
-  -n $NAMESPACE
+  --namespace "$NAMESPACE" \
+  --from-literal=TOKEN="$GITHUB_TOKEN" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# Git credentials for DAG sync
 kubectl create secret generic git-dags \
-  --from-literal=GIT_SYNC_USERNAME=$GITHUB_USERNAME \
-  --from-literal=GIT_SYNC_PASSWORD=$GITHUB_TOKEN \
-  --from-literal=GITSYNC_USERNAME=$GITHUB_USERNAME \
-  --from-literal=GITSYNC_PASSWORD=$GITHUB_TOKEN \
-  -n $NAMESPACE
+  --namespace "$NAMESPACE" \
+  --from-literal=GIT_SYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GIT_SYNC_PASSWORD="$GITHUB_TOKEN" \
+  --from-literal=GITSYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GITSYNC_PASSWORD="$GITHUB_TOKEN" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# GitLab registry credentials
 kubectl create secret docker-registry datasurface-registry \
+  --namespace "$NAMESPACE" \
   --docker-server=registry.gitlab.com \
   --docker-username="$GITLAB_CUSTOMER_USER" \
   --docker-password="$GITLAB_CUSTOMER_TOKEN" \
-  -n $NAMESPACE
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# Attach image pull secret to default service account (for job pods)
-kubectl patch serviceaccount default -n $NAMESPACE \
-  -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
-# Note: Airflow service accounts get the registry secret automatically
-# via registry.secretName in the helm values
+kubectl patch serviceaccount default -n "$NAMESPACE" \
+  -p '{"imagePullSecrets":[{"name":"datasurface-registry"}]}'
 ```
 
-**Checkpoint:** Run `kubectl get secrets -n $NAMESPACE` - should show all 6 secrets:
+Verify names and keys only:
 
-- postgres
-- postgres-demo-merge
-- git
-- git-dags
-- datasurface-registry
-- (plus default service account token)
+```bash
+kubectl get secrets -n "$NAMESPACE"
+kubectl describe secret airflow-metadata -n "$NAMESPACE"
+kubectl describe secret postgres-demo-merge -n "$NAMESPACE"
+kubectl describe secret git -n "$NAMESPACE"
+```
 
----
+## 6. Generate current bootstrap artifacts
 
-## Step 5: Install Airflow via Helm
+```bash
+IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}"
+
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
+docker pull --platform linux/amd64 "$IMAGE"
+
+docker run --rm --platform linux/amd64 \
+  -v "$(pwd)":/workspace/model \
+  -w /workspace/model \
+  "$IMAGE" \
+  python -m datasurface.entrypoints.platform generatePlatformBootstrap \
+    --ringLevel 0 \
+    --model /workspace/model \
+    --output /workspace/model/generated_output \
+    --psp Demo_PSP \
+    --rte-name demo
+```
+
+Verify current output:
+
+```bash
+find generated_output/Demo_PSP -maxdepth 1 -type f -print | sort
+test -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+test -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
+test -f generated_output/Demo_PSP/demo_psp_infrastructure_dag.py
+test -f generated_output/Demo_PSP/demo_psp_reconcile_views_job.yaml
+test ! -e generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
+
+for file in generated_output/Demo_PSP/*.yaml; do
+  kubectl apply --dry-run=client -f "$file" >/dev/null
+done
+python -m py_compile generated_output/Demo_PSP/*_dag.py
+```
+
+## 7. Publish every generated DAG
+
+Clone the DAG repository outside this model worktree. Clean only previously generated `*_dag.py`
+files, then copy all current generated DAGs so removed catalog/export DAGs do not linger.
+
+```bash
+DAG_CLONE=$(mktemp -d)
+git clone "https://github.com/${AIRFLOW_REPO}.git" "$DAG_CLONE"
+mkdir -p "$DAG_CLONE/dags"
+rm -f "$DAG_CLONE"/dags/*_dag.py
+cp generated_output/Demo_PSP/*_dag.py "$DAG_CLONE/dags/"
+
+git -C "$DAG_CLONE" add -A dags
+git -C "$DAG_CLONE" commit -m "Refresh generated DataSurface DAGs"
+git -C "$DAG_CLONE" push origin main
+```
+
+If the repo is initially empty, create and push its `main` branch before installing Airflow so
+git-sync has a valid remote ref.
+
+## 8. Install Airflow 3.3
 
 ```bash
 helm repo add apache-airflow https://airflow.apache.org
-helm repo update
+helm repo update apache-airflow
 
-helm install airflow apache-airflow/airflow \
-  -f helm/airflow-values.yaml \
-  -n $NAMESPACE \
-  --timeout 10m
+helm upgrade --install airflow apache-airflow/airflow \
+  --namespace "$NAMESPACE" \
+  --values helm/airflow-values.yaml \
+  --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
+  --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
+  --reset-values \
+  --timeout 20m \
+  --wait
 ```
 
-**Checkpoint:** Run `kubectl get pods -n $NAMESPACE` - Airflow pods should be starting/running:
+Airflow 3 uses `airflow-api-server` and `airflow-dag-processor`; do not look for an Airflow 2
+webserver deployment.
 
-- airflow-api-server
-- airflow-scheduler
-- airflow-dag-processor
-- airflow-triggerer
-- airflow-worker
-- airflow-redis
-- airflow-statsd
-
----
-
-## Step 5a: Create RBAC for Airflow Secret Access
-
-**CRITICAL: The infrastructure DAG needs to read Kubernetes secrets. Without this, DAGs will fail to import.**
+Grant Airflow components read-only access to namespace-local runtime Secrets:
 
 ```bash
-cat <<'EOF' | kubectl apply -f -
+cat <<YAML | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: airflow-secret-reader
-  namespace: $NAMESPACE
+  namespace: ${NAMESPACE}
 rules:
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: airflow-secret-reader-binding
-  namespace: $NAMESPACE
+  name: airflow-secret-reader
+  namespace: ${NAMESPACE}
 subjects:
-- kind: ServiceAccount
-  name: airflow-dag-processor
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-worker
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-scheduler
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-triggerer
-  namespace: $NAMESPACE
+  - {kind: ServiceAccount, name: airflow-dag-processor, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
 roleRef:
+  apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: airflow-secret-reader
-  apiGroup: rbac.authorization.k8s.io
-EOF
+YAML
 ```
 
-**Checkpoint:** Run `kubectl get role,rolebinding -n $NAMESPACE` - should show:
-
-- role.rbac.authorization.k8s.io/airflow-secret-reader
-- rolebinding.rbac.authorization.k8s.io/airflow-secret-reader-binding
-
----
-
-## Step 6: Pull DataSurface Image and Generate Bootstrap
+## 9. Apply bootstrap and ring 1
 
 ```bash
-# Login to GitLab registry
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-
-# Pull the image
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-# Generate bootstrap artifacts
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
-```
-
-**Checkpoint:** Run `ls generated_output/Demo_PSP/` - should contain:
-
-- kubernetes-bootstrap.yaml
-- demo_psp_infrastructure_dag.py
-- demo_psp_ring1_init_job.yaml
-- demo_psp_model_merge_job.yaml
-- demo_psp_reconcile_views_job.yaml
-
----
-
-## Step 7: Deploy Bootstrap and Jobs
-
-**IMPORTANT:** Jobs must be run sequentially. The ring1-init job creates database tables that model-merge depends on. Running them simultaneously causes a race condition where model-merge fails trying to access non-existent tables.
-
-```bash
-# Apply Kubernetes bootstrap
 kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+kubectl rollout status deployment/demo-psp-mcp-server \
+  -n "$NAMESPACE" --timeout=300s
 
-# Delete existing jobs if redeploying
-kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job -n $NAMESPACE --ignore-not-found
-
-# Step 1: Apply and wait for ring1-init to complete (creates tables)
+kubectl delete job demo-psp-ring1-init \
+  -n "$NAMESPACE" --ignore-not-found --wait=true
 kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
-kubectl wait --for=condition=complete --timeout=120s job/demo-psp-ring1-init -n $NAMESPACE
-
-# Step 2: Apply model-merge job (depends on tables created by ring1-init)
-kubectl apply -f generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
-kubectl wait --for=condition=complete --timeout=120s job/demo-psp-model-merge-job -n $NAMESPACE
+kubectl wait --for=condition=complete \
+  job/demo-psp-ring1-init -n "$NAMESPACE" --timeout=300s
+kubectl logs job/demo-psp-ring1-init -n "$NAMESPACE" --tail=80
 ```
 
-**Checkpoint:** Run `kubectl get jobs -n $NAMESPACE` - both jobs should complete:
+Do not apply or wait for `demo-psp-model-merge-job`; current DataSurface does not render it.
 
-- demo-psp-ring1-init: Complete
-- demo-psp-model-merge-job: Complete
+## 10. Trigger infrastructure/model merge
 
-If jobs fail, check logs:
+Wait for git-sync and DAG parsing, then:
 
 ```bash
-kubectl logs job/demo-psp-ring1-init -n $NAMESPACE
-kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json
+
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger demo-psp_infrastructure
+
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
----
+Wait for the new infrastructure run to reach `success`. Only then judge generated ingestion,
+CQRS, reconcile, or DataTransformer DAGs.
 
-## Step 8: Push DAG to Airflow Repository
+## 11. Verify
 
 ```bash
-# Clone the airflow DAG repository (or navigate to existing clone)
-cd /tmp
-git clone https://github.com/<org>/<airflow-repo>.git
-cd <airflow-repo>
+kubectl get pods -n "$NAMESPACE" -o wide
+kubectl get events -n "$NAMESPACE" \
+  --field-selector type=Warning --sort-by=.lastTimestamp
 
-# Copy the infrastructure DAG
-mkdir -p dags
-cp <path-to-model>/generated_output/Demo_PSP/demo_psp_infrastructure_dag.py dags/
-
-# Commit and push
-git add dags/
-git commit -m "Add infrastructure DAG"
-git push
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
 ```
 
-**Checkpoint:** Verify on GitHub that the DAG file exists in the airflow repository under `dags/`
+Expected invariants:
 
----
+- Airflow reports `3.3.x`;
+- no DAG import errors;
+- `demo-psp_infrastructure` most recent run succeeded;
+- the ring 1 Job completed;
+- MCP and Airflow core pods are Ready with stable restart counts;
+- generated runtime DAG IDs use SCD4/model-derived names. Discover them from `airflow dags list`;
+  do not assert an old fixed list.
 
-## Step 9: Verify Deployment
-
-### 9a. Check Pods and Jobs Status
+Access the UI:
 
 ```bash
-# Check all pods are running
-kubectl get pods -n $NAMESPACE
-
-# Check jobs completed
-kubectl get jobs -n $NAMESPACE
+kubectl port-forward svc/airflow-api-server 8080:8080 -n "$NAMESPACE"
 ```
 
-Expected state:
+The checked-in demo values create `admin` / `admin`. Change that password for any shared environment.
 
-- All airflow-* pods: Running
-- demo-psp-ring1-init: Complete (1/1)
-- demo-psp-model-merge-job: Complete (1/1)
+## Simulator
 
-### 9b. Verify Job Logs (No Errors)
+Source data generation is not part of bootstrap. After source databases and their credentials are
+ready, use `create-customer-data-simulator`. It deploys the current
+`datasurface-data-simulator` entry point as a restartable Deployment with Secret refs.
 
-```bash
-# Check ring1-init logs - should end with "Ring 1 initialization complete"
-kubectl logs job/demo-psp-ring1-init -n $NAMESPACE | tail -5
+## Troubleshooting
 
-# Check model-merge logs - should end with "Model merge handler complete"
-# and show "Populated factory DAG configurations" with config_count > 0
-kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE | tail -10
-```
-
-**Key success indicators in model-merge logs:**
-- `"Cleared existing factory DAG configurations"` - tables exist
-- `"Populated factory DAG configurations"` with `config_count: 2` (or more)
-- `"Populated CQRS DAG configurations"` with `config_count: 1` (or more)
-- No ERROR level messages (WARNING about event publishing is normal)
-
-### 9c. Verify Database Tables Created
-
-```bash
-# Connect to PostgreSQL and check tables exist in merge_db
-docker exec -it datasurface-postgres psql -U postgres -d merge_db -c "\dt"
-```
-
-Expected tables created by ring1-init:
-- `demo_psp_factory_dags`
-- `demo_psp_cqrs_dags`
-- `demo_psp_dc_reconcile_dags`
-- `scd4_airflow_dsg`
-- `scd4_airflow_datatransformer`
-
-**Checkpoint:** All pods running, jobs completed (1/1), tables exist in merge_db
-
-### 9d. Verify DAGs are Registered in Airflow
-
-Wait 60-90 seconds for git-sync to pull the DAG file, then verify DAGs are loaded:
-
-```bash
-kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- airflow dags list 2>&1 | grep -v "DeprecationWarning\|RemovedInAirflow\|permissions.py"
-```
-
-Expected DAGs (5 total):
-
-| DAG ID | Status | Description |
-|--------|--------|-------------|
-| `scd4_factory_dag` | Active | Factory DAG for SCD4 pipelines |
-| `Demo_PSP_K8sMergeDB_reconcile` | Active | DataContainer reconciliation |
-| `Demo_PSP_default_K8sMergeDB_cqrs` | Active | CQRS DAG |
-| `demo-psp_infrastructure` | Paused | Infrastructure management |
-| `scd4_datatransformer_factory` | Paused | DataTransformer factory |
-
-**Checkpoint:** All 5 DAGs appear in the list. If DAGs are missing, check for import errors:
-
-```bash
-kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- airflow dags list-import-errors
-```
-
----
-
-## Step 10: Access Airflow UI
-
-```bash
-kubectl port-forward svc/airflow-api-server 8080:8080 -n $NAMESPACE
-```
-
-Open <http://localhost:8080> in browser:
-
-- Username: `admin`
-- Password: `admin`
-
----
-
-## Troubleshooting Quick Reference
-
-### Namespace stuck in Terminating
-
-```bash
-kubectl get namespace $NAMESPACE -o json | jq '.spec.finalizers = []' | \
-  kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f -
-```
-
-### ImagePullBackOff
-
-```bash
-kubectl get secret datasurface-registry -n $NAMESPACE
-kubectl get sa default -n $NAMESPACE -o yaml | grep imagePullSecrets
-```
-
-### Job failures
-
-```bash
-kubectl logs job/demo-psp-ring1-init -n $NAMESPACE
-kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
-```
-
-### PostgreSQL connection issues
-
-```bash
-lsof -i :5432  # Check for port conflicts
-docker logs datasurface-postgres  # Check container logs
-```
-
-### PVC pending / storage class not found
-
-If PersistentVolumeClaims are stuck in Pending:
-
-```bash
-# Check available storage classes
-kubectl get storageclass
-
-# Check PVC status
-kubectl get pvc -n $NAMESPACE
-
-# Describe PVC for error details
-kubectl describe pvc <pvc-name> -n $NAMESPACE
-```
-
-Common fix: Update `storageClassName` in `helm/airflow-values.yaml` and `rte_demo.py` to match your cluster's storage class (e.g., `hostpath` instead of `standard`), then redeploy.
-
-### DAG import errors (Forbidden / secrets access)
-
-If DAGs fail to import with "Forbidden" errors reading secrets:
-
-```bash
-# Check for import errors
-kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- airflow dags list-import-errors
-
-# Verify RBAC exists
-kubectl get role,rolebinding -n $NAMESPACE | grep airflow-secret
-
-# If missing, create RBAC (see Step 5a) then restart dag-processor:
-
-kubectl rollout restart deployment/airflow-dag-processor -n $NAMESPACE
-```
+- Model lint rejects `ReadWriteOnce`: switch the git-cache PVC to a RWX-capable storage class and
+  `ReadWriteMany`.
+- `ImagePullBackOff`: inspect `datasurface-registry` and the target service account's
+  `imagePullSecrets`.
+- ring 1 fails: inspect its retained Job pod and logs; verify Git and merge Secrets by key name.
+- infrastructure DAG missing: confirm every generated `*_dag.py` was pushed and git-sync is on the
+  expected repository/branch.
+- infrastructure run fails: inspect its Airflow task logs. Current model merge is split across
+  tasks/containers; a historical failed pod is not the current health signal.
+- telemetry export errors with successful jobs are observability degradation, not automatically a
+  data-pipeline failure.

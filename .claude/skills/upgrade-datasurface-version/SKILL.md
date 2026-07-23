@@ -1,160 +1,138 @@
 ---
-name: Upgrade DataSurface Version
-description: Upgrade the DataSurface runtime image on an already-running environment to a new version. Use when the user says "upgrade DataSurface", "new DataSurface version", "bump the image", "update the runtime", or "upgrade to vX.Y.Z". Covers bumping the pin, regenerating bootstrap DAGs/jobs, and redeploying safely.
+name: upgrade-datasurface-version
+description: Upgrade the DataSurface package and runtime image on an existing demo1 environment. Use when bumping DataSurface, regenerating bootstrap artifacts, publishing a new model release, and rolling local, AWS, or Azure workloads safely.
 ---
-# Upgrade DataSurface Version
 
-Use this skill when moving a running DataSurface Yellow environment to a new runtime image version. This is **not** just a tag bump: the bootstrap DAG templates, job specs, and pod-naming conventions ship *inside* the image and can change between versions, so the ring-0/bootstrap artifacts must be regenerated with the new image and redeployed — a plain image swap without regeneration leaves stale generated DAGs/jobs behind.
+# Upgrade DataSurface
 
-## IMPORTANT: Execution Rules
+Treat the package, model image pins, CI validators, generated artifacts, and published model
+release as one versioned change. Do not patch running pods with `kubectl set image`; generated
+infrastructure is authoritative.
 
-- This changes a **running environment**. Do not patch the live cluster directly with ad-hoc `kubectl edit`/`kubectl set image` commands — the infra reconciler will revert local patches back to whatever the model/generated artifacts say.
-- Take the version bump through the **normal PR flow**: edit the model pin, validate locally, push via `edit-model-fragment` so it lands on `main` and gets tagged, then regenerate and redeploy from the new tagged release.
-- Regenerate bootstrap **every time**, even for a patch version bump. Skipping regeneration is the specific mistake this skill exists to prevent.
-- Read `.claude/skills/generate-bootstrap/SKILL.md` and `.claude/skills/edit-model-fragment/SKILL.md` before starting — this skill sequences them, it doesn't replace them.
+Read `generate-bootstrap/SKILL.md` and `edit-model-fragment/SKILL.md` before starting.
 
-## Step 1: Pick the Target Image Tag
-
-Confirm the target tag exists in the registry before pinning anything to it. See `.claude/skills/pull-datasurface-image/SKILL.md`.
+## 1. Confirm the target
 
 ```bash
-export DATASURFACE_VERSION="1.4.0"   # target version
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
+export DATASURFACE_VERSION="<target-version>"
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}"
+
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
+docker pull --platform linux/amd64 "$IMAGE"
+docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
 ```
 
-## Step 2: Bump the Image Pin in the Model
+Do not update the repository until the exact tag can be pulled.
 
-The pin is the single source of truth for which image every generated job/DAG uses. Find every place it's set:
+## 2. Move all repository pins together
+
+Search first:
 
 ```bash
-grep -rn "datasurfaceDockerImage" rte_*.py
+rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+  requirements.txt rte_*.py .github .gitlab-ci.yml
 ```
 
-Typically this appears in `rte_demo.py` (and `rte_aws.py` / `rte_azure.py` if those RTEs are also in use). Update each one, e.g.:
+Update:
 
-```python
-# Before
-datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.3.7"
-# After
-datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.4.0"
-```
+- `requirements.txt`;
+- `datasurfaceDockerImage` in every deployed `rte_*.py`;
+- `.github/workflows/pull-request.yml`;
+- `.gitlab-ci.yml`, when GitLab CI is used.
 
-Edit every RTE file that's actually deployed — a partial bump (e.g. `rte_demo.py` updated but `rte_aws.py` left stale) means that RTE keeps running the old image and its bootstrap artifacts won't match the new one.
+Do not change the Airflow image merely because the DataSurface version changed. Airflow has its
+own tested tag and should move only when the release requires it.
 
-## Step 3: Validate Locally, Then Push Through the Normal PR Flow
-
-Validate the model imports and constructs cleanly before pushing:
+Confirm the pins agree:
 
 ```bash
-python -c "from eco import createEcosystem; createEcosystem()"
+rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+  requirements.txt rte_*.py .github .gitlab-ci.yml
 ```
 
-Then push the change via `.claude/skills/edit-model-fragment/SKILL.md` (fresh branch off `main`, commit, push — this opens the PR). Once merged to `main`, tag the release so the loader picks it up (see `.claude/skills/start-initial-ingestion/SKILL.md` for the tag pattern, typically `v*.*.*-demo`):
+## 3. Validate before publishing
+
+Validate with the demo1 virtual environment:
 
 ```bash
-git checkout main && git pull origin main
-git tag v1.4.0-demo
-git push origin v1.4.0-demo
+.venv/bin/python -m unittest test_loads
+git diff --check
 ```
 
-Do not skip the PR/tag step and generate bootstrap from a local uncommitted pin — the running infrastructure DAG reads the model from git at a tagged release, not from your working tree.
+The `.venv` created from the pinned `requirements.txt` runs `test_loads` under `unittest`
+(no extra test dependencies required). Fix model construction or lint errors before pushing.
 
-## Step 4: Regenerate Bootstrap With the New Image
-
-This is the step a plain image bump misses. Dynamically-generated ingestion/CQRS DAGs are rebuilt automatically by the factory DAGs on the next model-merge, but the **bootstrap/infra DAGs and jobs are templates baked into the image** — they only get regenerated when you explicitly re-run ring-0 generation with the new image.
-
-Follow `.claude/skills/generate-bootstrap/SKILL.md` in full, pointed at the new version:
+Render each RTE that is actually deployed with the target image:
 
 ```bash
-rm -rf generated_output/
-
-docker run --rm \
+docker run --rm --platform linux/amd64 \
   -v "$(pwd)":/workspace/model \
   -w /workspace/model \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
+  "$IMAGE" \
+  python -m datasurface.entrypoints.platform generatePlatformBootstrap \
+    --ringLevel 0 \
+    --model /workspace/model \
+    --output /workspace/model/generated_output \
+    --psp Demo_PSP \
+    --rte-name demo
 ```
 
-Diff the new artifacts against the previous ones if you want to see what changed before applying:
+For cloud variants, configure `eco.py` to import `rte_aws` or `rte_azure` and render again with
+`--rte-name demo`; demo1 uses the same runtime declaration name for every provider.
+
+## 4. Publish the model
+
+Use the normal PR flow. After the change reaches `main`, create the next monotonically newer
+`vN.N.N-demo` tag and a stable, non-draft GitHub Release for it. The model release number is
+independent of the DataSurface package version.
+
+Do not generate production bootstrap artifacts from uncommitted changes, delete old releases, or
+move an existing tag.
+
+## 5. Regenerate and deploy
+
+Follow `generate-bootstrap/SKILL.md` in full with the target image and the environment's actual
+RTE. It will:
+
+1. regenerate only the selected PSP output;
+2. require the current four ring-0 artifacts;
+3. publish every generated `*_dag.py`;
+4. apply `kubernetes-bootstrap.yaml`;
+5. recreate and wait for ring 1;
+6. trigger `demo-psp_infrastructure`.
+
+Current versions do not generate `demo_psp_model_merge_job.yaml`. Model merge runs within the
+infrastructure DAG.
+
+## 6. Verify the rollout
+
+Check image digests on live pods, not tags alone:
 
 ```bash
-cp -r generated_output/Demo_PSP generated_output/Demo_PSP_old   # save before re-running, if not already done
-diff -r generated_output/Demo_PSP_old generated_output/Demo_PSP
+kubectl get pods -n "$NAMESPACE" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
 ```
 
-## Step 5: Redeploy the Regenerated Manifests
+Then verify:
 
 ```bash
-kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+kubectl get jobs -n "$NAMESPACE"
+kubectl get events -n "$NAMESPACE" \
+  --field-selector type=Warning --sort-by=.lastTimestamp
+
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
-Bootstrap Jobs are immutable in Kubernetes. If a prior completed Job of the same name still exists (older images may lack `ttlSecondsAfterFinished`), `kubectl apply` on the Job manifests will fail — delete the completed Jobs first:
+Require a completed ring-1 Job, no DAG import errors, a successful new infrastructure run, and
+healthy model-derived DAGs. Use `check-system-health` and `verify-data-fidelity` before declaring
+the upgrade complete.
 
-```bash
-kubectl delete job demo-psp-ring1-init -n demo1 --ignore-not-found
-kubectl delete job demo-psp-model-merge-job -n demo1 --ignore-not-found
-
-kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
-kubectl apply -f generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
-```
-
-If the infrastructure DAG file changed, copy it to the GitSync repo the same way `generate-bootstrap` describes:
-
-```bash
-cp generated_output/Demo_PSP/demo_psp_infrastructure_dag.py /path/to/demo1_airflow/dags/
-cd /path/to/demo1_airflow && git add dags/ && git commit -m "Bump to DataSurface v${DATASURFACE_VERSION}" && git push
-```
-
-## Step 6: Verify
-
-Confirm pods are actually running the new image (a stale scheduler cache can leave old pods running even after apply):
-
-```bash
-kubectl get pods -n demo1 -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.containers[*].image}{"\n"}{end}'
-```
-
-Confirm the model-merge job succeeded on the new version:
-
-```bash
-kubectl logs -n demo1 job/demo-psp-model-merge-job --tail=50
-```
-
-Then confirm DAGs are present, unpaused, and running, and that data still flows correctly — use `.claude/skills/check-system-health/SKILL.md` for throughput/health, and cross-check row counts/fidelity between source, merge, and CQRS the way that skill and `.claude/skills/start-initial-ingestion/SKILL.md` describe.
-
-## Step 7: Version-Skew Notes
-
-Certain upgrades change more than the image tag:
-
-- Generated pod names may gain/lose a hash suffix.
-- DAG result signaling may move between mechanisms (e.g. log-parsing vs XCom) — old log-grep-based health checks can silently stop matching.
-- Job/DAG control-flow shape (task ordering, task IDs) may change between versions.
-
-A full bootstrap regeneration (Step 4) handles all of these because the new templates are authoritative. If a health check or troubleshooting command elsewhere in this skill set stops matching what you see after an upgrade, suspect a template change before suspecting a bug — compare against the freshly generated artifacts rather than assuming the old command is still correct.
-
-## Report
-
-```
-DataSurface Upgrade Report
-===========================
-From: v<old>  →  To: v<new>
-Model pin updated: rte_demo.py [rte_aws.py / rte_azure.py if applicable]
-PR merged: <link/commit>   Tag: v<new>-demo
-
-Bootstrap regenerated:   ✅ / ❌
-Old jobs deleted+reapplied: ✅ / ❌ / N/A (had TTL)
-Infra DAG copied to GitSync: ✅ / ❌ / N/A (unchanged)
-
-Pods on new image:      ✅ <N>/<N>  |  ⚠️ partial  |  ❌ still old
-Model-merge job:        ✅ succeeded  |  ❌ failed
-DAGs unpaused/running:  ✅ / ⚠️ / ❌
-Data flowing (health):  ✅ / ⚠️ / ❌
-
-Issues Found:
-  - <issue> → see <skill>
-```
+Report the old and new versions, model release, registry digest, environments rendered,
+infrastructure run status, live pod image IDs, and any test or verification that could not run.

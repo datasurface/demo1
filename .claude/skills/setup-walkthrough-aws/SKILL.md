@@ -1,405 +1,171 @@
 ---
-name: DataSurface AWS EKS Setup Walkthrough
-description: Interactive walkthrough for setting up a DataSurface Yellow environment on AWS EKS with Aurora, Helm Airflow 3.x, AWS Secrets Manager, EFS, and IRSA. Use this skill to guide users through the complete AWS installation process step-by-step.
+name: setup-walkthrough-aws
+description: Set up demo1 on AWS EKS with RDS PostgreSQL, EFS, Airflow 3.3, administrator-managed Kubernetes Secrets, and the generated SCD4 infrastructure DAG. Use for a new or rebuilt AWS demo1 environment; optionally add ESO.
 ---
 
-# DataSurface AWS EKS Setup Walkthrough
+# DataSurface AWS EKS setup walkthrough
 
-This skill guides you through deploying a DataSurface Yellow environment on AWS EKS (Elastic Kubernetes Service). It uses CloudFormation for infrastructure, Aurora PostgreSQL for databases, EFS for shared storage, AWS Secrets Manager for credentials, and IRSA (IAM Roles for Service Accounts) for pod-level AWS access. Follow each step in order and verify completion before proceeding.
+The starter path uses:
 
-## IMPORTANT: Execution Rules
+- DataSurface `1.8.4`;
+- Airflow `3.3.0`;
+- EKS, RDS PostgreSQL, and EFS;
+- SCD4 platform `Demo_PSP`;
+- administrator-managed namespace-local Kubernetes Secrets;
+- ring 1 bootstrap followed by model merge through `demo-psp_infrastructure`.
 
-1. **Execute steps sequentially** - Do not skip ahead or combine steps
-2. **Verify each step** - Confirm success before proceeding to the next step
-3. **Ask for missing information** - If environment variables or credentials are not provided, ask the user
-4. **Report failures immediately** - If any step fails, stop and troubleshoot before continuing
+`rte_aws.py` explicitly sets `externalSecretProvider=None`. External Secrets Operator is an
+optional customer choice, not a prerequisite. Airflow pods do not need AWS Secrets Manager access
+in the starter configuration.
 
-## Pre-Flight Checklist
+## Execution rules
 
-Before starting, verify the user has:
+1. Verify the AWS account, region, cluster, namespace, and repository before every mutation.
+2. Do not delete stacks, databases, releases, tags, or namespaces unless a clean rebuild was
+   explicitly requested.
+3. Keep passwords and tokens out of committed Helm values and command output.
+4. Use a temporary rendered Helm values file.
+5. Do not look for or apply a standalone model-merge Job. Current model merge runs inside the
+   infrastructure DAG.
 
-- [ ] Docker Desktop running (for image builds and bootstrap generation)
-- [ ] AWS CLI installed and configured (`aws sts get-caller-identity` succeeds)
-- [ ] `kubectl` CLI installed
-- [ ] `helm` CLI installed
-- [ ] GitHub Personal Access Token (needs repo access)
-- [ ] GitLab credentials for DataSurface images
-
-Ask the user for these environment variables if not already set:
-
-```bash
-AWS_ACCOUNT_ID          # 12-digit AWS account ID
-AWS_REGION              # AWS region (default: us-east-1)
-KEY_PAIR_NAME           # EC2 key pair for node SSH access
-STACK_NAME              # CloudFormation stack name (short, unique, e.g., "ds-eks-v1")
-DATABASE_PASSWORD       # Aurora PostgreSQL password
-GITHUB_USERNAME         # GitHub username
-GITHUB_TOKEN            # GitHub Personal Access Token (repo access)
-GITLAB_CUSTOMER_USER    # GitLab deploy token username
-GITLAB_CUSTOMER_TOKEN   # GitLab deploy token
-DATASURFACE_VERSION     # DataSurface version (default: 1.1.0)
-MODEL_REPO              # Target model repo (e.g., yourorg/demo1_actual)
-AIRFLOW_REPO            # Target DAG repo (e.g., yourorg/demo1_airflow)
-NAMESPACE               # K8s namespace (default: demo1-aws)
-```
-
-Verify AWS CLI is configured:
+## Preflight
 
 ```bash
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=${AWS_REGION:-us-east-1}
+STACK_NAME=<short-stack-name>
+KEY_PAIR_NAME=<ec2-key-pair>
+NAMESPACE=${NAMESPACE:-demo1-aws}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.8.4}
+MODEL_REPO=<owner/model-repo>
+AIRFLOW_REPO=<owner/dag-repo>
+GITHUB_USERNAME=<github-user>
+
 aws sts get-caller-identity
+kubectl version --client
+helm version
+docker version
+git status --short
 ```
 
----
+Also require `DATABASE_PASSWORD`, `AIRFLOW_ADMIN_PASSWORD`, `GITHUB_TOKEN`,
+`GITLAB_CUSTOMER_USER`, and `GITLAB_CUSTOMER_TOKEN` in the environment, plus `jq` and `python3` on
+the operator machine. Do not echo secret values.
 
-## Phase 1: AWS Infrastructure
+## 1. Provision or reuse AWS infrastructure
 
-### Step 0: Clean Up Previous Installation (If Exists)
-
-**Always run this step, even for "fresh" installations.** Previous CloudFormation stacks, namespaces, or secrets can cause conflicts.
-
-#### 0a. Delete existing CloudFormation stacks (if they exist)
+For a new environment, deploy the checked-in two-stage CloudFormation templates:
 
 ```bash
-# Check for existing stacks
-aws cloudformation describe-stacks --stack-name "${STACK_NAME}-iam-roles" --region $AWS_REGION 2>/dev/null && \
-  aws cloudformation delete-stack --stack-name "${STACK_NAME}-iam-roles" --region $AWS_REGION && \
-  aws cloudformation wait stack-delete-complete --stack-name "${STACK_NAME}-iam-roles" --region $AWS_REGION
-
-aws cloudformation describe-stacks --stack-name $STACK_NAME --region $AWS_REGION 2>/dev/null && \
-  aws cloudformation delete-stack --stack-name $STACK_NAME --region $AWS_REGION && \
-  aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME --region $AWS_REGION
-```
-
-#### 0b. Delete existing namespace (if it exists)
-
-```bash
-kubectl get namespace $NAMESPACE 2>/dev/null && \
-  kubectl delete namespace $NAMESPACE
-
-# If namespace is stuck in Terminating state (wait 30 seconds, then check):
-kubectl get namespace $NAMESPACE -o json 2>/dev/null | jq '.spec.finalizers = []' | \
-  kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f -
-```
-
-#### 0c. Clean up AWS Secrets Manager secrets (if they exist)
-
-```bash
-aws secretsmanager delete-secret --secret-id "airflow/connections/postgres_default" \
-  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
-aws secretsmanager delete-secret --secret-id "datasurface/merge/credentials" \
-  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
-aws secretsmanager delete-secret --secret-id "datasurface/git/credentials" \
-  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
-aws secretsmanager delete-secret --secret-id "datasurface/${NAMESPACE}/Demo/postgres-demo-merge" \
-  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
-aws secretsmanager delete-secret --secret-id "datasurface/${NAMESPACE}/Demo/git" \
-  --force-delete-without-recovery --region $AWS_REGION 2>/dev/null || true
-```
-
-**Checkpoint:**
-- `aws cloudformation describe-stacks --stack-name $STACK_NAME --region $AWS_REGION` returns "does not exist"
-- `kubectl get namespace $NAMESPACE` returns "not found"
-- No lingering secrets in Secrets Manager
-
----
-
-### Step 1: Deploy EKS Cluster (CloudFormation Stage 1)
-
-This creates the VPC, EKS cluster, node group, Aurora PostgreSQL, and EFS file system.
-
-**IMPORTANT:** `STACK_NAME` should be short to avoid S3 bucket name 63-character limit issues.
-
-```bash
-aws cloudformation create-stack \
-  --stack-name $STACK_NAME \
-  --template-body file://aws-marketplace/cloudformation/datasurface-eks-stack.yaml \
-  --parameters \
-    ParameterKey=KeyPairName,ParameterValue=$KEY_PAIR_NAME \
-    ParameterKey=DatabasePassword,ParameterValue=$DATABASE_PASSWORD \
-    ParameterKey=GitHubToken,ParameterValue=$GITHUB_TOKEN \
-    ParameterKey=CreateDatabase,ParameterValue=true \
-    ParameterKey=KubernetesDeploymentType,ParameterValue=EKS-EC2 \
+aws cloudformation deploy \
+  --stack-name "$STACK_NAME" \
+  --template-file aws-marketplace/cloudformation/datasurface-eks-stack.yaml \
+  --parameter-overrides \
+    KeyPairName="$KEY_PAIR_NAME" \
+    DatabasePassword="$DATABASE_PASSWORD" \
+    CreateDatabase=true \
+    KubernetesDeploymentType=EKS-EC2 \
   --capabilities CAPABILITY_IAM \
-  --region $AWS_REGION
-
-# Wait for stack creation (~15 minutes)
-aws cloudformation wait stack-create-complete --stack-name $STACK_NAME --region $AWS_REGION
+  --region "$AWS_REGION"
 ```
 
-**Checkpoint:**
+Capture outputs:
 
 ```bash
-aws cloudformation describe-stacks --stack-name $STACK_NAME \
-  --query 'Stacks[0].StackStatus' --output text --region $AWS_REGION
-```
+CLUSTER_NAME=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`EKSClusterName`].OutputValue' --output text)
+POSTGRES_ENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' --output text)
+EFS_FILE_SYSTEM_ID=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`EFSFileSystemId`].OutputValue' --output text)
+OIDC_PROVIDER_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`EKSOIDCProviderArn`].OutputValue' --output text)
 
-Stack status must be `CREATE_COMPLETE`.
-
-**IMPORTANT: Create application databases on Aurora.** CloudFormation creates the PostgreSQL instance but not the specific databases needed by Airflow and DataSurface:
-
-```bash
-export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' \
-  --output text --region $AWS_REGION)
-```
-
-**Note:** Database creation requires kubeconfig and Aurora SG access. These are configured in Step 4. If running Step 1 straight through, configure kubeconfig first (run just the `aws eks update-kubeconfig` and SG fix from Step 4), then create the databases:
-
-```bash
-kubectl run db-setup --restart=Never \
-  --image=postgres:16 \
-  --env="PGPASSWORD=$DATABASE_PASSWORD" \
-  --command -- bash -c "psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE airflow_db;' && psql -h $AURORA_ENDPOINT -U postgres -c 'CREATE DATABASE merge_db;'"
-
-sleep 15
-kubectl logs db-setup
-kubectl delete pod db-setup --ignore-not-found
-```
-
-**Note:** Use non-interactive pod + logs instead of `--rm -i` to reliably capture output. Verify both databases exist:
-
-```bash
-kubectl run db-verify --restart=Never \
-  --image=postgres:16 \
-  --env="PGPASSWORD=$DATABASE_PASSWORD" \
-  --command -- psql -h $AURORA_ENDPOINT -U postgres -c "SELECT datname FROM pg_database WHERE datname IN ('airflow_db', 'merge_db');"
-
-sleep 15
-kubectl logs db-verify
-kubectl delete pod db-verify --ignore-not-found
-```
-
-Both `airflow_db` and `merge_db` should appear in the output.
-
----
-
-### Step 2: Deploy IAM Roles (CloudFormation Stage 2)
-
-This creates IRSA roles for EFS CSI driver and Airflow secrets access. The roles are created without OIDC scope conditions (CloudFormation limitation - see template comments). Step 3 applies the correct trust policies via CLI.
-
-```bash
-export OIDC_PROVIDER_ARN=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query "Stacks[0].Outputs[?OutputKey=='EKSOIDCProviderArn'].OutputValue" \
-  --output text --region $AWS_REGION)
-
-aws cloudformation create-stack \
-  --stack-name "${STACK_NAME}-iam-roles" \
-  --template-body file://aws-marketplace/cloudformation/iam-roles-for-eks.yaml \
-  --parameters \
-    ParameterKey=EKSOIDCProviderArn,ParameterValue=$OIDC_PROVIDER_ARN \
-    ParameterKey=StackName,ParameterValue=$STACK_NAME \
-  --capabilities CAPABILITY_IAM \
-  --region $AWS_REGION
-
-aws cloudformation wait stack-create-complete --stack-name "${STACK_NAME}-iam-roles" --region $AWS_REGION
-```
-
-**Checkpoint:**
-
-```bash
-aws cloudformation describe-stacks --stack-name "${STACK_NAME}-iam-roles" \
-  --query 'Stacks[0].StackStatus' --output text --region $AWS_REGION
-```
-
-Both stacks must be `CREATE_COMPLETE`.
-
----
-
-### Step 3: Apply OIDC Trust Policies (REQUIRED)
-
-**CloudFormation cannot use intrinsic functions as YAML mapping keys**, so the IAM roles are created without OIDC scope conditions. This step applies the correctly scoped trust policies via AWS CLI. **Do not skip this step** - without it the roles are overly permissive.
-
-```bash
-OIDC_ISSUER=$(echo $OIDC_PROVIDER_ARN | cut -d'/' -f2-)
-
-# Fix EFS CSI driver role
-EFS_ROLE_ARN=$(aws cloudformation describe-stacks \
-  --stack-name "${STACK_NAME}-iam-roles" \
-  --query 'Stacks[0].Outputs[?OutputKey==`EFSCSIDriverRoleArn`].OutputValue' \
-  --output text --region $AWS_REGION)
-EFS_ROLE_NAME=$(echo $EFS_ROLE_ARN | cut -d'/' -f2)
-
-cat > efs-trust-policy.json << EOF
-{
-    "Version": "2012-10-17",
-    "Statement": [{
-        "Effect": "Allow",
-        "Principal": {"Federated": "$OIDC_PROVIDER_ARN"},
-        "Action": "sts:AssumeRoleWithWebIdentity",
-        "Condition": {
-            "StringEquals": {
-                "${OIDC_ISSUER}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa",
-                "${OIDC_ISSUER}:aud": "sts.amazonaws.com"
-            }
-        }
-    }]
-}
-EOF
-aws iam update-assume-role-policy --role-name $EFS_ROLE_NAME --policy-document file://efs-trust-policy.json
-
-# Fix Airflow secrets role
-# Use StringLike with wildcard so all Airflow SAs (worker, dag-processor, scheduler, triggerer)
-# can assume the role. The infrastructure DAG reads secrets at parse time via AwsSecretManager,
-# which runs in the dag-processor/scheduler pods, not just the worker.
-cat > airflow-trust-policy.json << EOF
-{
-    "Version": "2012-10-17",
-    "Statement": [{
-        "Effect": "Allow",
-        "Principal": {"Federated": "$OIDC_PROVIDER_ARN"},
-        "Action": "sts:AssumeRoleWithWebIdentity",
-        "Condition": {
-            "StringLike": {
-                "${OIDC_ISSUER}:sub": "system:serviceaccount:${NAMESPACE}:airflow-*"
-            },
-            "StringEquals": {
-                "${OIDC_ISSUER}:aud": "sts.amazonaws.com"
-            }
-        }
-    }]
-}
-EOF
-AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
-  --stack-name "${STACK_NAME}-iam-roles" \
-  --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
-  --output text --region $AWS_REGION)
-AIRFLOW_ROLE_NAME=$(echo $AIRFLOW_ROLE_ARN | cut -d'/' -f2)
-aws iam update-assume-role-policy --role-name $AIRFLOW_ROLE_NAME --policy-document file://airflow-trust-policy.json
-
-# Clean up temp files
-rm -f efs-trust-policy.json airflow-trust-policy.json
-```
-
-**Checkpoint:**
-- Both `aws iam update-assume-role-policy` commands complete without error
-- Verify with: `aws iam get-role --role-name $EFS_ROLE_NAME --query 'Role.AssumeRolePolicyDocument'`
-
----
-
-## Phase 2: EKS Configuration
-
-### Step 4: Configure kubeconfig
-
-```bash
-export CLUSTER_NAME=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`EKSClusterName`].OutputValue' \
-  --output text --region $AWS_REGION)
-
-aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
-kubectl get nodes
-```
-
-**Checkpoint:** All nodes should be in `Ready` status:
-
-```bash
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
 kubectl get nodes -o wide
 ```
 
-**IMPORTANT: Fix Aurora security group for EKS pod access.** The CloudFormation template allows RDS access from its own EKS cluster security group, but EKS also creates a managed cluster security group that pods actually use. Add both the EKS managed cluster SG and node remote access SG:
+Deploy the IAM roles stack for the EFS CSI driver. The default stack does not create an
+External Secrets role:
 
 ```bash
-RDS_SG=$(aws ec2 describe-security-groups --region $AWS_REGION \
-  --filters "Name=group-name,Values=${STACK_NAME}-rds-sg" \
-  --query 'SecurityGroups[0].GroupId' --output text)
-
-EKS_CLUSTER_SG=$(aws eks describe-cluster --name $CLUSTER_NAME \
-  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text --region $AWS_REGION)
-
-EKS_NODE_SG=$(aws eks describe-nodegroup --cluster-name $CLUSTER_NAME \
-  --nodegroup-name "${STACK_NAME}-nodegroup" \
-  --query 'nodegroup.resources.remoteAccessSecurityGroup' --output text --region $AWS_REGION)
-
-aws ec2 authorize-security-group-ingress \
-  --group-id $RDS_SG --protocol tcp --port 5432 \
-  --source-group $EKS_CLUSTER_SG --region $AWS_REGION 2>/dev/null || true
-
-aws ec2 authorize-security-group-ingress \
-  --group-id $RDS_SG --protocol tcp --port 5432 \
-  --source-group $EKS_NODE_SG --region $AWS_REGION 2>/dev/null || true
-
-echo "RDS security group updated for EKS pod access"
+aws cloudformation deploy \
+  --stack-name "${STACK_NAME}-iam-roles" \
+  --template-file aws-marketplace/cloudformation/iam-roles-for-eks.yaml \
+  --parameter-overrides \
+    EKSOIDCProviderArn="$OIDC_PROVIDER_ARN" \
+    StackName="$STACK_NAME" \
+  --capabilities CAPABILITY_IAM \
+  --region "$AWS_REGION"
 ```
 
-**Checkpoint:** Test Aurora connectivity from a pod:
+## 2. Configure EFS and database connectivity
+
+Scope the EFS role's IRSA trust to
+`system:serviceaccount:kube-system:efs-csi-controller-sa`, then install the EKS add-on and annotate
+that service account. Do not add Airflow service accounts to the trust policy.
 
 ```bash
-kubectl run db-test --rm -i --restart=Never \
-  --image=postgres:16 \
-  --env="PGPASSWORD=$DATABASE_PASSWORD" \
-  -- psql -h $AURORA_ENDPOINT -U postgres -c "SELECT 1;"
-```
+EFS_ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "${STACK_NAME}-iam-roles" --region "$AWS_REGION" \
+  --query 'Stacks[0].Outputs[?OutputKey==`EFSCSIDriverRoleArn`].OutputValue' --output text)
+EFS_ROLE_NAME=${EFS_ROLE_ARN##*/}
+OIDC_ISSUER=${OIDC_PROVIDER_ARN#*/}
 
----
+TRUST_FILE=$(mktemp)
+jq -n \
+  --arg provider "$OIDC_PROVIDER_ARN" \
+  --arg sub_key "${OIDC_ISSUER}:sub" \
+  --arg aud_key "${OIDC_ISSUER}:aud" \
+  '{
+    Version:"2012-10-17",
+    Statement:[{
+      Effect:"Allow",
+      Principal:{Federated:$provider},
+      Action:"sts:AssumeRoleWithWebIdentity",
+      Condition:{StringEquals:{
+        ($sub_key):"system:serviceaccount:kube-system:efs-csi-controller-sa",
+        ($aud_key):"sts.amazonaws.com"
+      }}
+    }]
+  }' > "$TRUST_FILE"
+aws iam update-assume-role-policy \
+  --role-name "$EFS_ROLE_NAME" \
+  --policy-document "file://$TRUST_FILE"
+rm -f "$TRUST_FILE"
 
-### Step 5: Install EFS CSI Driver
-
-```bash
-aws eks create-addon \
-  --cluster-name $CLUSTER_NAME \
+if aws eks describe-addon \
+  --cluster-name "$CLUSTER_NAME" \
   --addon-name aws-efs-csi-driver \
-  --region $AWS_REGION
-
+  --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws eks update-addon \
+    --cluster-name "$CLUSTER_NAME" \
+    --addon-name aws-efs-csi-driver \
+    --service-account-role-arn "$EFS_ROLE_ARN" \
+    --resolve-conflicts PRESERVE \
+    --region "$AWS_REGION"
+else
+  aws eks create-addon \
+    --cluster-name "$CLUSTER_NAME" \
+    --addon-name aws-efs-csi-driver \
+    --service-account-role-arn "$EFS_ROLE_ARN" \
+    --resolve-conflicts OVERWRITE \
+    --region "$AWS_REGION"
+fi
 aws eks wait addon-active \
-  --cluster-name $CLUSTER_NAME \
+  --cluster-name "$CLUSTER_NAME" \
   --addon-name aws-efs-csi-driver \
-  --region $AWS_REGION
-
-# Annotate service account with IAM role for IRSA
-kubectl annotate serviceaccount efs-csi-controller-sa \
-  -n kube-system \
-  eks.amazonaws.com/role-arn=$EFS_ROLE_ARN \
-  --overwrite
-
-# Restart controller to pick up the annotation
-kubectl rollout restart deployment/efs-csi-controller -n kube-system
-kubectl rollout status deployment/efs-csi-controller -n kube-system
+  --region "$AWS_REGION"
 ```
 
-**Checkpoint:**
+Create the RWX storage class:
 
 ```bash
-kubectl get pods -n kube-system -l app=efs-csi-controller
-```
-
-EFS CSI controller pods should be `Running`.
-
----
-
-### Step 6: Install Secrets Store CSI Driver
-
-```bash
-helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
-helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver --namespace kube-system
-
-# Install AWS provider
-kubectl apply -f https://raw.githubusercontent.com/aws/secrets-store-csi-driver-provider-aws/main/deployment/aws-provider-installer.yaml
-
-# Wait for provider pods
-kubectl wait --for=condition=ready pod -l app=csi-secrets-store-provider-aws -n kube-system --timeout=60s
-```
-
-**Checkpoint:**
-
-```bash
-kubectl get pods -n kube-system -l app=csi-secrets-store-provider-aws
-```
-
-Provider pods should be `Running`.
-
----
-
-### Step 7: Create EFS StorageClass and Test
-
-```bash
-export EFS_FILE_SYSTEM_ID=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`EFSFileSystemId`].OutputValue' \
-  --output text --region $AWS_REGION)
-
-cat > efs-storageclass.yaml << EOF
+cat <<YAML | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -407,897 +173,319 @@ metadata:
 provisioner: efs.csi.aws.com
 parameters:
   provisioningMode: efs-ap
-  fileSystemId: $EFS_FILE_SYSTEM_ID
+  fileSystemId: ${EFS_FILE_SYSTEM_ID}
   directoryPerms: "0755"
   uid: "50000"
   gid: "50000"
 volumeBindingMode: Immediate
-EOF
-kubectl apply -f efs-storageclass.yaml
-rm efs-storageclass.yaml
+YAML
 ```
 
-Test EFS provisioning with a temporary PVC:
+Confirm the RDS security group allows port `5432` from the EKS managed cluster/node security
+groups. Test from a short-lived pod before continuing.
+
+Create `airflow_db` and `merge_db` if they do not exist:
 
 ```bash
-cat > test-efs-pvc.yaml << EOF
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: test-efs-pvc
-  namespace: default
-spec:
-  storageClassName: efs-sc
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Gi
-EOF
-kubectl apply -f test-efs-pvc.yaml
-sleep 30
-
-PVC_STATUS=$(kubectl get pvc test-efs-pvc -o jsonpath='{.status.phase}')
-if [ "$PVC_STATUS" = "Bound" ]; then
-    echo "EFS provisioning test successful"
-    kubectl delete pvc test-efs-pvc
-    rm test-efs-pvc.yaml
-else
-    echo "EFS provisioning FAILED - check troubleshooting section"
-    kubectl describe pvc test-efs-pvc
-fi
+kubectl run db-setup --restart=Never --image=postgres:16 \
+  --env="PGPASSWORD=$DATABASE_PASSWORD" \
+  --command -- bash -ceu \
+  "psql -h '$POSTGRES_ENDPOINT' -U postgres -At -c \
+   \"SELECT 1 FROM pg_database WHERE datname='airflow_db'\" | grep -q 1 ||
+   psql -h '$POSTGRES_ENDPOINT' -U postgres -c 'CREATE DATABASE airflow_db';
+   psql -h '$POSTGRES_ENDPOINT' -U postgres -At -c \
+   \"SELECT 1 FROM pg_database WHERE datname='merge_db'\" | grep -q 1 ||
+   psql -h '$POSTGRES_ENDPOINT' -U postgres -c 'CREATE DATABASE merge_db'"
+kubectl wait --for=condition=Ready pod/db-setup --timeout=120s
+kubectl logs db-setup
+kubectl delete pod db-setup
 ```
 
-**Checkpoint:** Test PVC status is `Bound`. If it fails, see the EFS troubleshooting section below.
+## 3. Configure the model and temporary Helm values
 
----
+Update:
 
-## Phase 3: Model Preparation
+- `eco.py` to import `createDemoRTE` from `rte_aws` and use `MODEL_REPO`;
+- `rte_aws.py` placeholders for namespace, RDS PostgreSQL endpoint, and AWS account;
+- DataSurface image tag to `v1.8.4`;
+- keep `externalSecretProvider=None`.
 
-### Step 8: Verify rte_aws.py Exists
+Create a non-committed values file:
 
 ```bash
-ls -la rte_aws.py
-```
-
-The file should already exist in the repository. It contains the AWS-specific runtime environment configuration (Aurora endpoints, EFS storage class, IRSA annotations, Secrets Manager references). If missing, see the plan documentation for the full file content.
-
-**Checkpoint:** File exists and contains AWS-specific configuration.
-
----
-
-### Step 9: Verify eco.py Import Line
-
-```bash
-grep "from rte_" eco.py
-```
-
-The file has a comment indicating where the import swap happens:
-```python
-# For AWS deployment, the setup-walkthrough-aws skill changes this to: from rte_aws import createDemoRTE
-from rte_demo import createDemoRTE
-```
-
-Change the import from `rte_demo` to `rte_aws`. This is done in Step 10 along with the other placeholder replacements.
-
-**Checkpoint:** `eco.py` contains `from rte_aws import createDemoRTE` (verified after Step 10).
-
----
-
-### Step 10: Customize Model and Helm Values
-
-Get CloudFormation outputs and replace PLACEHOLDERs in both `rte_aws.py` and the Helm values file:
-
-```bash
-export AURORA_ENDPOINT=$(aws cloudformation describe-stacks \
-  --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`DatabaseEndpoint`].OutputValue' \
-  --output text --region $AWS_REGION)
-
-export AIRFLOW_ROLE_ARN=$(aws cloudformation describe-stacks \
-  --stack-name "${STACK_NAME}-iam-roles" \
-  --query 'Stacks[0].Outputs[?OutputKey==`AirflowSecretsRoleArn`].OutputValue' \
-  --output text --region $AWS_REGION)
-
-# Switch eco.py to use the AWS RTE instead of local
-sed -i.bak "s|from rte_demo import createDemoRTE|from rte_aws import createDemoRTE|g" eco.py
-rm -f eco.py.bak
-
-# Update eco.py with the correct GitHub repo owner and name
-# MODEL_REPO is in "owner/repo" format - split it for the two variables
-MODEL_OWNER=$(echo $MODEL_REPO | cut -d'/' -f1)
-MODEL_NAME=$(echo $MODEL_REPO | cut -d'/' -f2)
-sed -i.bak "s|GIT_REPO_OWNER: str = \"git_username\"|GIT_REPO_OWNER: str = \"$MODEL_OWNER\"|g" eco.py
-sed -i.bak "s|GIT_REPO_NAME: str = \"gitrepo_name\"|GIT_REPO_NAME: str = \"$MODEL_NAME\"|g" eco.py
-rm -f eco.py.bak
-
-# Replace placeholders in rte_aws.py (model configuration)
-sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" rte_aws.py
-sed -i.bak "s|PLACEHOLDER_AWS_ACCOUNT_ID|$AWS_ACCOUNT_ID|g" rte_aws.py
-sed -i.bak "s|PLACEHOLDER_NAMESPACE|$NAMESPACE|g" rte_aws.py
-rm -f rte_aws.py.bak
-
-# Create a temporary copy of Helm values and replace placeholders there.
-# The original file stays clean with PLACEHOLDERs so credentials never touch the working tree.
 cp helm/airflow-values-aws.yaml /tmp/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AURORA_ENDPOINT|$AURORA_ENDPOINT|g" /tmp/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_DB_PASSWORD|$DATABASE_PASSWORD|g" /tmp/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" /tmp/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AIRFLOW_ROLE_ARN|$AIRFLOW_ROLE_ARN|g" /tmp/airflow-values-aws.yaml
-sed -i.bak "s|PLACEHOLDER_AWS_REGION|$AWS_REGION|g" /tmp/airflow-values-aws.yaml
+sed -i.bak \
+  -e "s|PLACEHOLDER_AIRFLOW_REPO|$AIRFLOW_REPO|g" \
+  /tmp/airflow-values-aws.yaml
 rm -f /tmp/airflow-values-aws.yaml.bak
+
+AIRFLOW_ADMIN_PASSWORD="$AIRFLOW_ADMIN_PASSWORD" \
+  python3 - /tmp/airflow-values-aws.yaml <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(
+    path.read_text().replace(
+        "PLACEHOLDER_AIRFLOW_ADMIN_PASSWORD",
+        json.dumps(os.environ["AIRFLOW_ADMIN_PASSWORD"]),
+    )
+)
+PY
+chmod 600 /tmp/airflow-values-aws.yaml
+
+if rg -n 'PLACEHOLDER_[A-Z0-9_]+' /tmp/airflow-values-aws.yaml; then
+  echo "Unresolved Airflow values placeholder" >&2
+  exit 1
+fi
+git diff --check
+.venv/bin/python -m unittest test_loads
 ```
 
-**Note:** On macOS, `sed -i` requires a backup extension. Use `sed -i.bak` then remove the `.bak` file.
+Do not commit `/tmp/airflow-values-aws.yaml`.
 
-**IMPORTANT:** The `rte_aws.py` values are baked into the model and committed to the repository. Task pods spawned by the infrastructure DAG load the model from git at runtime and do NOT have access to environment variables like `MERGE_HOST` or `AWS_ACCOUNT_ID`. All deployment-specific values must be string literals in the committed file, not `os.environ` lookups.
+## 4. Publish a stable model release
 
-**Note:** The Helm values file includes `sslmode: require` in the `metadataConnection` block. This is required for Aurora/RDS connections and should not be removed.
-
-**Note:** The Helm values file includes an `env` section that sets `AWS_DEFAULT_REGION` and `AWS_REGION` on all Airflow pods. This is required because the infrastructure DAG uses `boto3.client('secretsmanager')` at parse time via `AwsSecretManager` without specifying a region.
-
-**Checkpoint:**
+Commit only model/template changes, push `main`, create the next `vN.N.N-demo` tag, and publish a
+stable GitHub Release. Do not delete all historical tags/releases.
 
 ```bash
-grep PLACEHOLDER rte_aws.py
-grep PLACEHOLDER /tmp/airflow-values-aws.yaml
-grep rte_demo eco.py
+git remote set-url origin "https://github.com/${MODEL_REPO}.git"
+git add eco.py rte_aws.py requirements.txt
+git commit -m "Configure DataSurface for AWS EKS"
+git push -u origin main
+
+git fetch --tags
+git tag -l 'v*-demo' | sort -V | tail -5
+MODEL_TAG=<next-vN.N.N-demo>
+git tag -a "$MODEL_TAG" -m "$MODEL_TAG"
+git push origin "$MODEL_TAG"
 ```
 
-All should return no matches (all PLACEHOLDERs replaced, eco.py imports rte_aws). The original `helm/airflow-values-aws.yaml` in the working tree should still have PLACEHOLDERs.
+Create a non-draft, non-prerelease GitHub Release for `$MODEL_TAG`.
 
----
+## 5. Create namespace-local Secrets
 
-### Step 11: Airflow Image (Skip if Merge Database is PostgreSQL)
-
-The standard `apache/airflow:3.1.7` image includes the PostgreSQL driver. **If your merge database is PostgreSQL (the default for Aurora), skip this step.**
-
-**A custom image is required when the merge database is NOT PostgreSQL** (e.g. SQL Server on Azure, Oracle, DB2). The infrastructure DAG dynamically creates DAGs using records in the merge database, and Airflow worker pods need the appropriate database driver to connect. Without it, the generated DAGs will fail at runtime.
-
-The Dockerfile (`Docker.airflow_with_drivers`) is located in the DataSurface Python package at `src/datasurface/platforms/yellow/docker/`, NOT in this model repository. If you need it, build and push the custom image, then update `images.airflow.repository` and `images.airflow.tag` in `helm/airflow-values-aws.yaml` before Step 10's placeholder replacement.
-
----
-
-### Step 12: Push Model to Repository and Tag
-
-#### 12a. Scrub existing tags and releases from the model repo
-
-**IMPORTANT:** Old tags (e.g. `v1.0.1-demo`) will cause the infrastructure DAG to pick the wrong version. Delete ALL existing remote tags before pushing the new one.
-
-**Do NOT use `gh` CLI** - it is typically not authenticated. Use `git` commands only for tag operations.
+Use `create-k8-credential` for canonical key shapes and safe rotation.
 
 ```bash
-git remote set-url origin https://github.com/$MODEL_REPO.git
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# Delete ALL existing remote tags
-git ls-remote --tags origin | awk '{print $2}' | sed 's|refs/tags/||' | while read tag; do
-  echo "Deleting remote tag: $tag"
-  git push origin --delete "$tag"
-done
+AIRFLOW_METADATA_URI=$(
+  DATABASE_PASSWORD="$DATABASE_PASSWORD" POSTGRES_ENDPOINT="$POSTGRES_ENDPOINT" python3 -c \
+  'import os; from urllib.parse import quote; print("postgresql+psycopg2://postgres:" + quote(os.environ["DATABASE_PASSWORD"], safe="") + "@" + os.environ["POSTGRES_ENDPOINT"] + ":5432/airflow_db?sslmode=require")'
+)
+kubectl create secret generic airflow-metadata \
+  --namespace "$NAMESPACE" \
+  --from-literal=connection="$AIRFLOW_METADATA_URI" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
+unset AIRFLOW_METADATA_URI
 
-# Delete all local tags to avoid stale references
-git tag -l | xargs git tag -d 2>/dev/null || true
-```
+kubectl create secret generic git \
+  --namespace "$NAMESPACE" \
+  --from-literal=TOKEN="$GITHUB_TOKEN" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-**Note:** If there are existing GitHub **Releases** tied to old tags, the user must delete them manually via the GitHub web UI at `https://github.com/$MODEL_REPO/releases` before proceeding. The GitHub API and `gh` CLI typically require elevated token permissions for release deletion that standard PATs do not have.
+kubectl create secret generic postgres-demo-merge \
+  --namespace "$NAMESPACE" \
+  --from-literal=USER=postgres \
+  --from-literal=PASSWORD="$DATABASE_PASSWORD" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-#### 12b. Commit, push, and tag
+kubectl create secret generic git-dags \
+  --namespace "$NAMESPACE" \
+  --from-literal=GIT_SYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GIT_SYNC_PASSWORD="$GITHUB_TOKEN" \
+  --from-literal=GITSYNC_USERNAME="$GITHUB_USERNAME" \
+  --from-literal=GITSYNC_PASSWORD="$GITHUB_TOKEN" \
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-```bash
-git add eco.py rte_aws.py
-git commit -m "Configure model for AWS EKS deployment"
-git push -u origin main --force
-
-git tag v1.0.0-demo
-git push origin v1.0.0-demo
-```
-
-#### 12c. Create a GitHub Release (MANUAL STEP)
-
-**IMPORTANT: Create a GitHub Release (not just a tag).** The infrastructure DAG uses `VersionPatternReleaseSelector` with `ReleaseType.STABLE_ONLY`, which queries the GitHub **Releases API** - git tags alone are not sufficient.
-
-**Do NOT attempt to create releases via `gh` CLI or the GitHub API** - the user's PAT typically lacks the required permissions. Instead, ask the user to create the release manually:
-
-1. Go to `https://github.com/$MODEL_REPO/releases/new`
-2. Select the `v1.0.0-demo` tag
-3. Set the release title to `v1.0.0-demo`
-4. Ensure **"Set as a pre-release"** is **unchecked** (must be a stable release)
-5. Click **"Publish release"**
-
-**Wait for the user to confirm the release is created before proceeding.**
-
-**Checkpoint:**
-- `git remote -v` shows the target model repository
-- `git log -1` shows the configure commit
-- `git tag` shows only `v1.0.0-demo` (no stale tags)
-- User confirms the GitHub Release is published (not pre-release)
-
----
-
-## Phase 4: Secrets & Bootstrap
-
-### Step 13: Create AWS Secrets Manager Secrets
-
-```bash
-# Airflow DB connection (URI format for CSI driver file mounting)
-aws secretsmanager create-secret \
-  --name "airflow/connections/postgres_default" \
-  --description "Airflow database connection for Aurora (CSI mounted)" \
-  --secret-string "postgresql://postgres:${DATABASE_PASSWORD}@${AURORA_ENDPOINT}:5432/airflow_db" \
-  --region $AWS_REGION
-
-# Merge database credentials (JSON format for boto3 access in DAGs)
-aws secretsmanager create-secret \
-  --name "datasurface/merge/credentials" \
-  --description "DataSurface merge database credentials" \
-  --secret-string "{\"postgres_USER\":\"postgres\",\"postgres_PASSWORD\":\"${DATABASE_PASSWORD}\"}" \
-  --region $AWS_REGION
-
-# Git credentials
-aws secretsmanager create-secret \
-  --name "datasurface/git/credentials" \
-  --description "DataSurface Git repository credentials" \
-  --secret-string "{\"token\":\"${GITHUB_TOKEN}\"}" \
-  --region $AWS_REGION
-
-# Namespace-scoped secrets (used by generated infrastructure DAG and jobs)
-# The DAG and jobs look up secrets at: datasurface/{namespace}/{ecosystem_name}/{credential_name}
-# The secrets above (datasurface/merge/credentials, datasurface/git/credentials) are still needed
-# for the CSI driver and backward compatibility, but these namespace-scoped secrets are what the
-# DAG and standalone jobs actually read at runtime.
-aws secretsmanager create-secret \
-  --name "datasurface/${NAMESPACE}/Demo/postgres-demo-merge" \
-  --description "DataSurface merge DB credentials (namespace-scoped for DAG/job access)" \
-  --secret-string "{\"USER\":\"postgres\",\"PASSWORD\":\"${DATABASE_PASSWORD}\"}" \
-  --region $AWS_REGION
-
-aws secretsmanager create-secret \
-  --name "datasurface/${NAMESPACE}/Demo/git" \
-  --description "DataSurface Git credentials (namespace-scoped for DAG/job access)" \
-  --secret-string "{\"token\":\"${GITHUB_TOKEN}\",\"TOKEN\":\"${GITHUB_TOKEN}\"}" \
-  --region $AWS_REGION
-```
-
-Verify all secrets were created:
-
-```bash
-aws secretsmanager list-secrets \
-  --query 'SecretList[?contains(Name, `datasurface`) || contains(Name, `airflow`)].Name' \
-  --output table --region $AWS_REGION
-```
-
-**Checkpoint:** All 5 secrets are listed:
-- `airflow/connections/postgres_default`
-- `datasurface/merge/credentials`
-- `datasurface/git/credentials`
-- `datasurface/${NAMESPACE}/Demo/postgres-demo-merge`
-- `datasurface/${NAMESPACE}/Demo/git`
-
----
-
-### Step 14: Generate Bootstrap Artifacts
-
-```bash
-docker login registry.gitlab.com -u "$GITLAB_CUSTOMER_USER" -p "$GITLAB_CUSTOMER_TOKEN"
-docker pull registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}
-
-docker run --rm \
-  -v "$(pwd)":/workspace/model \
-  -w /workspace/model \
-  -e RTE_TARGET=aws \
-  -e MERGE_HOST="$AURORA_ENDPOINT" \
-  -e AWS_ACCOUNT_ID="$AWS_ACCOUNT_ID" \
-  -e NAMESPACE="$NAMESPACE" \
-  registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION} \
-  python -m datasurface.cmd.platform generatePlatformBootstrap \
-  --ringLevel 0 \
-  --model /workspace/model \
-  --output /workspace/model/generated_output \
-  --psp Demo_PSP \
-  --rte-name demo
-```
-
-**Checkpoint:**
-
-```bash
-ls generated_output/Demo_PSP/
-```
-
-Should contain:
-- kubernetes-bootstrap.yaml
-- infrastructure_dag.py (or demo_psp_infrastructure_dag.py)
-- ring1_init_job.yaml (or demo_psp_ring1_init_job.yaml)
-- model_merge_job.yaml (or demo_psp_model_merge_job.yaml)
-- reconcile_views_job.yaml (or demo_psp_reconcile_views_job.yaml)
-
----
-
-## Phase 5: Deploy to EKS
-
-### Step 16: Create Namespace and Registry Secret
-
-```bash
-kubectl create namespace $NAMESPACE
-
-# GitLab registry credentials for pulling DataSurface images
 kubectl create secret docker-registry datasurface-registry \
+  --namespace "$NAMESPACE" \
   --docker-server=registry.gitlab.com \
   --docker-username="$GITLAB_CUSTOMER_USER" \
   --docker-password="$GITLAB_CUSTOMER_TOKEN" \
-  -n $NAMESPACE
+  --dry-run=client -o yaml |
+  kubectl apply -f -
 
-# Attach image pull secret to default service account
-kubectl patch serviceaccount default -n $NAMESPACE \
-  -p '{"imagePullSecrets": [{"name": "datasurface-registry"}]}'
+kubectl patch serviceaccount default -n "$NAMESPACE" \
+  -p '{"imagePullSecrets":[{"name":"datasurface-registry"}]}'
 ```
 
-Create git-dags secret for Helm git-sync:
+Verify names/key names without decoding values:
 
 ```bash
-kubectl create secret generic git-dags \
-  --from-literal=GIT_SYNC_USERNAME=$GITHUB_USERNAME \
-  --from-literal=GIT_SYNC_PASSWORD=$GITHUB_TOKEN \
-  --from-literal=GITSYNC_USERNAME=$GITHUB_USERNAME \
-  --from-literal=GITSYNC_PASSWORD=$GITHUB_TOKEN \
-  -n $NAMESPACE
+kubectl get secrets -n "$NAMESPACE"
+kubectl describe secret airflow-metadata -n "$NAMESPACE"
+kubectl describe secret postgres-demo-merge -n "$NAMESPACE"
+kubectl describe secret git -n "$NAMESPACE"
 ```
 
-**Checkpoint:**
+No AWS Secrets Manager objects, Secrets Store CSI driver, or SecretProviderClass are required for
+the starter path.
+
+## 6. Generate and validate bootstrap artifacts
 
 ```bash
-kubectl get secrets -n $NAMESPACE
+IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v${DATASURFACE_VERSION}"
+printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
+  docker login registry.gitlab.com \
+    --username "$GITLAB_CUSTOMER_USER" --password-stdin
+docker pull --platform linux/amd64 "$IMAGE"
+
+docker run --rm --platform linux/amd64 \
+  -v "$(pwd)":/workspace/model \
+  -w /workspace/model \
+  "$IMAGE" \
+  python -m datasurface.entrypoints.platform generatePlatformBootstrap \
+    --ringLevel 0 \
+    --model /workspace/model \
+    --output /workspace/model/generated_output \
+    --psp Demo_PSP \
+    --rte-name demo
+
+find generated_output/Demo_PSP -maxdepth 1 -type f -print | sort
+test ! -e generated_output/Demo_PSP/demo_psp_model_merge_job.yaml
+for file in generated_output/Demo_PSP/*.yaml; do
+  kubectl apply --dry-run=client -f "$file" >/dev/null
+done
+python -m py_compile generated_output/Demo_PSP/*_dag.py
 ```
 
-Should show:
-- `datasurface-registry`
-- `git-dags`
+With `externalSecretProvider=None`, `kubernetes-bootstrap.yaml` must not contain
+`kind: ExternalSecret`.
 
----
+## 7. Publish generated DAGs before Airflow starts
 
-### Step 17: Initialize DAG Repository (BEFORE Helm Install)
-
-**CRITICAL: This must happen BEFORE Helm install (Step 19).** The Airflow Helm chart uses git-sync init containers that will fail with `couldn't find remote ref main` if the DAG repository is empty or missing the `main` branch. This causes pods to enter `Init:Error` state.
+Initialize the DAG repository's `main` branch if necessary, remove only old generated `*_dag.py`
+files, and copy every current generated DAG:
 
 ```bash
-cd /tmp
-rm -rf $(basename $AIRFLOW_REPO)
-git clone https://github.com/$AIRFLOW_REPO.git
-cd $(basename $AIRFLOW_REPO)
-git checkout -b main 2>/dev/null || git checkout main
-
-mkdir -p dags
-cp <path-to-model>/generated_output/Demo_PSP/*infrastructure_dag*.py dags/
-
-git add dags/
-git commit -m "Add infrastructure DAG"
-git push -u origin main
-
-cd <path-to-model>
+DAG_CLONE=$(mktemp -d)
+git clone "https://github.com/${AIRFLOW_REPO}.git" "$DAG_CLONE"
+mkdir -p "$DAG_CLONE/dags"
+rm -f "$DAG_CLONE"/dags/*_dag.py
+cp generated_output/Demo_PSP/*_dag.py "$DAG_CLONE/dags/"
+git -C "$DAG_CLONE" add -A dags
+git -C "$DAG_CLONE" commit -m "Refresh generated DataSurface DAGs"
+git -C "$DAG_CLONE" push origin main
 ```
 
-Replace `<path-to-model>` with the actual path to your model repository.
-
-**Checkpoint:** DAG file exists on GitHub under `dags/` on the `main` branch. Verify at `https://github.com/$AIRFLOW_REPO`.
-
----
-
-### Step 18: Create SecretProviderClass for AWS Secrets Store CSI
-
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: secrets-store.csi.x-k8s.io/v1
-kind: SecretProviderClass
-metadata:
-  name: airflow-secrets
-  namespace: $NAMESPACE
-spec:
-  provider: aws
-  parameters:
-    objects: |
-      - objectName: "airflow/connections/postgres_default"
-        objectType: "secretsmanager"
-        objectAlias: "airflow-db-connection"
-EOF
-```
-
-**Checkpoint:**
-
-```bash
-kubectl get secretproviderclass -n $NAMESPACE
-```
-
-Should show `airflow-secrets`.
-
----
-
-### Step 19: Install Airflow via Helm
+## 8. Install Airflow 3.3 and secret-read RBAC
 
 ```bash
 helm repo add apache-airflow https://airflow.apache.org
-helm repo update
-
-helm install airflow apache-airflow/airflow \
-  -f /tmp/airflow-values-aws.yaml \
-  -n $NAMESPACE \
-  --timeout 10m
+helm repo update apache-airflow
+helm upgrade --install airflow apache-airflow/airflow \
+  --namespace "$NAMESPACE" \
+  --values /tmp/airflow-values-aws.yaml \
+  --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
+  --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
+  --reset-values --timeout 20m --wait
+rm -f /tmp/airflow-values-aws.yaml
 ```
 
-**Checkpoint:**
+The generated Airflow secret manager reads namespace-local Kubernetes Secrets. Grant read-only
+access to Airflow component service accounts:
 
 ```bash
-kubectl get pods -n $NAMESPACE
-```
-
-All Airflow pods should reach `Running` state:
-- airflow-api-server
-- airflow-scheduler
-- airflow-dag-processor
-- airflow-triggerer
-- airflow-worker
-- airflow-redis
-- airflow-statsd
-
-**Note:** If pods are stuck in `Init:Error`, the DAG repository was not initialized before this step (Step 17).
-
-#### 19a. Annotate All Airflow Service Accounts with IRSA Role
-
-The Helm chart's `serviceAccount` block only annotates the `airflow-worker` SA. The dag-processor, scheduler, and triggerer also need Secrets Manager access because the infrastructure DAG reads secrets at parse time via `AwsSecretManager`. Annotate all Airflow SAs:
-
-```bash
-# Annotate all Airflow service accounts with IRSA role (needed for DAG parsing + job execution)
-for sa in airflow-worker airflow-dag-processor airflow-scheduler airflow-triggerer; do
-  kubectl annotate serviceaccount $sa -n $NAMESPACE eks.amazonaws.com/role-arn=$AIRFLOW_ROLE_ARN --overwrite
-done
-
-# IMPORTANT: Restart ALL Airflow pods to pick up IRSA annotations.
-# Deployments can use rollout restart, but StatefulSets (worker, triggerer) require pod deletion.
-kubectl rollout restart deployment/airflow-dag-processor deployment/airflow-scheduler deployment/airflow-api-server -n $NAMESPACE
-kubectl delete pod -n $NAMESPACE -l component=worker
-kubectl delete pod -n $NAMESPACE -l component=triggerer
-
-# Wait for all pods to be ready
-kubectl rollout status deployment/airflow-dag-processor -n $NAMESPACE
-kubectl rollout status deployment/airflow-scheduler -n $NAMESPACE
-kubectl rollout status deployment/airflow-api-server -n $NAMESPACE
-kubectl wait --for=condition=ready pod -l component=worker -n $NAMESPACE --timeout=120s
-kubectl wait --for=condition=ready pod -l component=triggerer -n $NAMESPACE --timeout=120s
-```
-
-**Checkpoint:**
-
-```bash
-for sa in airflow-worker airflow-dag-processor airflow-scheduler airflow-triggerer; do
-  echo "$sa: $(kubectl get sa $sa -n $NAMESPACE -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}')"
-done
-```
-
-All four service accounts should show the IRSA role ARN.
-
-**CRITICAL: Verify IRSA is actually injected into the worker pod** (not just the SA annotation):
-
-```bash
-kubectl exec -n $NAMESPACE airflow-worker-0 -c worker -- env | grep AWS_ROLE_ARN
-```
-
-This must show the IRSA role ARN. If it shows nothing, the pod was not restarted after annotation - delete it again with `kubectl delete pod airflow-worker-0 -n $NAMESPACE`.
-
----
-
-### Step 20: Create RBAC for Airflow Secret Access
-
-**CRITICAL: The infrastructure DAG needs to read Kubernetes secrets. Without this, DAGs will fail to import.**
-
-```bash
-cat <<EOF | kubectl apply -f -
+cat <<YAML | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: airflow-secret-reader
-  namespace: $NAMESPACE
+  namespace: ${NAMESPACE}
 rules:
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: airflow-secret-reader-binding
-  namespace: $NAMESPACE
+  name: airflow-secret-reader
+  namespace: ${NAMESPACE}
 subjects:
-- kind: ServiceAccount
-  name: airflow-dag-processor
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-worker
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-scheduler
-  namespace: $NAMESPACE
-- kind: ServiceAccount
-  name: airflow-triggerer
-  namespace: $NAMESPACE
+  - {kind: ServiceAccount, name: airflow-dag-processor, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
 roleRef:
+  apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: airflow-secret-reader
-  apiGroup: rbac.authorization.k8s.io
-EOF
+YAML
 ```
 
-**Checkpoint:**
+Airflow service accounts need no IRSA annotations in this default path.
+
+## 9. Apply bootstrap, ring 1, and infrastructure merge
 
 ```bash
-kubectl get role,rolebinding -n $NAMESPACE
-```
-
-Should show:
-- `role.rbac.authorization.k8s.io/airflow-secret-reader`
-- `rolebinding.rbac.authorization.k8s.io/airflow-secret-reader-binding`
-
----
-
-### Step 21: Deploy Bootstrap and Run Jobs
-
-**IMPORTANT:** Jobs must run sequentially. The ring1-init job creates database tables that model-merge depends on. Running them simultaneously causes a race condition where model-merge fails trying to access non-existent tables.
-
-#### 21a. Validate Generated YAML
-
-The generated YAMLs should be ready to use directly. Verify they look correct:
-
-```bash
-# Verify storageClassName is efs-sc (not gp3)
-grep storageClassName generated_output/Demo_PSP/kubernetes-bootstrap.yaml
-
-# Verify serviceAccountName is airflow-worker (not airflow-service-account)
-grep serviceAccountName generated_output/Demo_PSP/*job*.yaml
-
-# Verify env wrapper for hyphenated credential names exists
-grep 'env "postgres-demo-merge' generated_output/Demo_PSP/*job*.yaml
-
-# Validate all YAMLs parse correctly
-for f in generated_output/Demo_PSP/*.yaml; do
-  kubectl apply --dry-run=client -f "$f" && echo "$f: OK" || echo "$f: FAILED"
-done
-```
-
-If any of these checks fail, you may be using an older DataSurface image. Pull the latest v1.1.0 image and regenerate (Step 14).
-
-#### 21b. Deploy Bootstrap and Run Jobs
-
-```bash
-# Apply Kubernetes bootstrap (creates PVCs, ConfigMaps, NetworkPolicy, MCP server)
 kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+kubectl rollout status deployment/demo-psp-mcp-server \
+  -n "$NAMESPACE" --timeout=300s
 
-# Ensure Airflow service account has IRSA annotation (safety net - Helm should set this too)
-kubectl annotate serviceaccount airflow-worker \
-  -n $NAMESPACE \
-  eks.amazonaws.com/role-arn=$AIRFLOW_ROLE_ARN \
-  --overwrite
+kubectl delete job demo-psp-ring1-init \
+  -n "$NAMESPACE" --ignore-not-found --wait=true
+kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
+kubectl wait --for=condition=complete \
+  job/demo-psp-ring1-init -n "$NAMESPACE" --timeout=300s
 
-# Delete existing jobs if redeploying
-kubectl delete job demo-psp-ring1-init demo-psp-model-merge-job -n $NAMESPACE --ignore-not-found
-
-# Run ring1-init (creates tables) - must complete before model-merge
-kubectl apply -f generated_output/Demo_PSP/*ring1_init_job*.yaml
-kubectl wait --for=condition=complete --timeout=180s job/demo-psp-ring1-init -n $NAMESPACE
-
-# Run model-merge (populates DAG configs) - depends on tables created by ring1-init
-kubectl apply -f generated_output/Demo_PSP/*model_merge_job*.yaml
-kubectl wait --for=condition=complete --timeout=180s job/demo-psp-model-merge-job -n $NAMESPACE
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-import-errors --output json
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  airflow dags trigger demo-psp_infrastructure
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
+  airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
-**Checkpoint:**
+Wait for the new infrastructure run to reach `success`. Do not apply a
+`demo_psp_model_merge_job.yaml`; it is obsolete.
+
+## 10. Verify
 
 ```bash
-kubectl get jobs -n $NAMESPACE
+kubectl get pods -n "$NAMESPACE" -o wide
+kubectl get events -n "$NAMESPACE" \
+  --field-selector type=Warning --sort-by=.lastTimestamp
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version
+kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+  env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
 ```
 
-Both jobs should show `Complete` with `1/1` completions:
-- `demo-psp-ring1-init`: Complete
-- `demo-psp-model-merge-job`: Complete
-
-If jobs fail, check logs:
-
-```bash
-kubectl logs job/demo-psp-ring1-init -n $NAMESPACE
-kubectl logs job/demo-psp-model-merge-job -n $NAMESPACE
-```
-
-**Key success indicators in model-merge logs:**
-- `"Cleared existing factory DAG configurations"` - tables exist
-- `"Populated factory DAG configurations"` with `config_count: 2` (or more)
-- `"Populated CQRS DAG configurations"` with `config_count: 1` (or more)
-- No ERROR level messages (WARNING about event publishing is normal)
-
----
-
-## Phase 6: Verify & Access
-
-### Step 22: Create Airflow Admin User
-
-```bash
-kubectl exec deployment/airflow-scheduler -n $NAMESPACE -- \
-  airflow users create \
-  --username admin \
-  --firstname Admin \
-  --lastname User \
-  --role Admin \
-  --email admin@example.com \
-  --password admin123
-```
-
-**Checkpoint:** Command completes with "Admin user admin created".
-
----
-
-### Step 23: Verify DAGs Registered
-
-Wait 60-90 seconds for git-sync to pull the DAG files, then verify:
-
-```bash
-kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
-  airflow dags list 2>&1 | grep -v "DeprecationWarning\|RemovedInAirflow\|permissions.py"
-```
-
-Expected DAGs (5 total):
-
-| DAG ID | Description |
-|--------|-------------|
-| `scd4_factory_dag` | Factory DAG for SCD4 pipelines |
-| `Demo_PSP_K8sMergeDB_reconcile` | DataContainer reconciliation |
-| `Demo_PSP_default_K8sMergeDB_cqrs` | CQRS DAG |
-| `demo-psp_infrastructure` | Infrastructure management |
-| `scd4_datatransformer_factory` | DataTransformer factory |
-
-Check for import errors:
-
-```bash
-kubectl exec -n $NAMESPACE deployment/airflow-dag-processor -c dag-processor -- \
-  airflow dags list-import-errors
-```
-
-**Checkpoint:** All 5 DAGs appear in the list with no import errors.
-
----
-
-### Step 24: Port-Forward and Access UI
-
-```bash
-kubectl port-forward svc/airflow-api-server 8080:8080 -n $NAMESPACE
-```
-
-Open <http://localhost:8080> in your browser:
-- Username: `admin`
-- Password: `admin123`
-
-**Checkpoint:** Airflow UI loads and all 5 DAGs are visible in the DAGs list.
-
----
-
-## Troubleshooting
-
-### PVCs Stuck Pending (EFS)
-
-**Symptoms:** PersistentVolumeClaims stuck in `Pending` state.
-
-```bash
-kubectl describe pvc <pvc-name> -n $NAMESPACE
-```
-
-**Common causes and fixes:**
-
-1. **EFS CSI driver not running:**
-   ```bash
-   kubectl get pods -n kube-system -l app=efs-csi-controller
-   ```
-
-2. **Service account missing IAM role annotation:**
-   ```bash
-   kubectl get sa efs-csi-controller-sa -n kube-system -o yaml | grep eks.amazonaws.com
-   ```
-   If missing, re-run the annotation from Step 5.
-
-3. **OIDC trust policy mismatch (most common):**
-   This should have been fixed in Step 3. Verify:
-   ```bash
-   aws iam get-role --role-name $EFS_ROLE_NAME \
-     --query 'Role.AssumeRolePolicyDocument' --output json
-   ```
-   The OIDC issuer in the trust policy must match your cluster's actual OIDC provider.
-
-4. **Restart the EFS CSI controller:**
-   ```bash
-   kubectl rollout restart deployment/efs-csi-controller -n kube-system
-   kubectl rollout status deployment/efs-csi-controller -n kube-system
-   ```
-
----
-
-### Insufficient CPU
-
-**Symptoms:** Pods stuck in `Pending` with "Insufficient cpu" events.
-
-Default `m5.large` instances have 2 vCPU which may be insufficient for all Airflow components. Recommend `m5.xlarge` (4 vCPU).
-
-**Temporary fix** - reduce resource requests:
-
-```bash
-kubectl patch deployment airflow-scheduler -n $NAMESPACE \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/cpu", "value": "500m"}]'
-
-kubectl patch deployment airflow-dag-processor -n $NAMESPACE \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/cpu", "value": "500m"}]'
-```
-
-**Permanent fix:** Update the CloudFormation template or node group to use `m5.xlarge` instances.
-
----
-
-### Secrets Manager Access Denied
-
-**Symptoms:** Pods fail with "AccessDeniedException" when reading secrets from AWS Secrets Manager.
-
-Verify IRSA annotation on the airflow-worker service account:
-
-```bash
-kubectl get sa airflow-worker -n $NAMESPACE -o yaml | grep eks.amazonaws.com
-```
-
-Test with a temporary pod:
-
-```bash
-kubectl run test --rm -i --restart=Never \
-  --image=amazon/aws-cli \
-  --serviceaccount=airflow-worker \
-  -n $NAMESPACE \
-  -- aws sts get-caller-identity
-```
-
-The output should show the Airflow secrets role ARN, not the node instance role.
-
----
-
-### Worker OOMKilled
-
-**Symptoms:** Worker pod killed with `OOMKilled` status, DAG tasks appear stuck/hung in the UI with no logs.
-
-The default worker memory limit of 2Gi is insufficient when workers execute KubernetesPodOperator tasks. The Helm values template already sets 4Gi limits, but if you used lower values, increase them:
-
-```bash
-helm upgrade airflow apache-airflow/airflow \
-  -f /tmp/airflow-values-aws.yaml \
-  --set workers.resources.requests.memory=2Gi \
-  --set workers.resources.limits.memory=4Gi \
-  --set workers.resources.limits.cpu=2000m \
-  -n $NAMESPACE
-
-# Force pod recreation (Helm upgrade may not recreate StatefulSet pods)
-kubectl delete pod airflow-worker-0 -n $NAMESPACE
-```
-
-**Checkpoint:** Worker pod restarts with `3/3` containers ready:
-
-```bash
-kubectl get pod airflow-worker-0 -n $NAMESPACE
-kubectl describe pod airflow-worker-0 -n $NAMESPACE | grep -A2 "Limits:"
-```
-
----
-
-### Init Container OOMKilled
-
-**Symptoms:** Init containers killed with `OOMKilled` status.
-
-Add resource limits to init containers in the Helm values:
-
-```yaml
-resources:
-  requests:
-    memory: 2Gi
-    cpu: 500m
-  limits:
-    memory: 4Gi
-    cpu: 1000m
-```
-
----
-
-### Aurora Connectivity From Pods
-
-**Symptoms:** Jobs fail with "could not connect to server", "connection refused", or "SSL connection is required" errors.
-
-Test database connectivity from inside a pod:
-
-```bash
-kubectl run db-test --rm -i --restart=Never \
-  --image=postgres:16 \
-  --env="PGPASSWORD=$DATABASE_PASSWORD" \
-  -n $NAMESPACE \
-  -- psql -h $AURORA_ENDPOINT -U postgres -c "SELECT version();"
-```
-
-If this fails, check:
-
-1. **Security group mismatch (most common cause):** The CloudFormation template creates an RDS security group that allows access from the EKS cluster security group it creates, but EKS also creates its own **managed cluster security group** that pods actually use for networking. You must add ingress rules for both the EKS managed cluster SG and the node remote access SG. See the security group fix in Step 4.
-
-2. **Aurora security group allows inbound from EKS node security group on port 5432.** Verify with:
-   ```bash
-   aws ec2 describe-security-groups --group-ids $RDS_SG --region $AWS_REGION \
-     --query 'SecurityGroups[0].IpPermissions'
-   ```
-
-3. **Aurora is in the same VPC** or has VPC peering configured.
-
-4. **Aurora cluster is in `available` state.**
-
-5. **SSL mode mismatch:** Aurora/RDS requires SSL connections by default. Ensure connection strings include `sslmode=require`. The Helm values file should have `sslmode: require` in the `metadataConnection` block, and the Secrets Manager connection URI should work without explicit sslmode since `psql` defaults to preferring SSL.
-
----
-
-### Missing Database Drivers in Airflow Image
-
-**Symptoms:** Dynamically generated DAGs fail with connection errors like `ModuleNotFoundError: No module named 'pymssql'` or similar database driver errors.
-
-The standard `apache/airflow:3.1.7` image only includes the PostgreSQL driver. If your merge database is SQL Server, Oracle, or DB2, the worker pods need the corresponding driver to connect. Build the custom image (see Step 11) with the required drivers.
-
-Verify what drivers are available:
-
-```bash
-kubectl exec -n $NAMESPACE deployment/airflow-scheduler -c scheduler -- pip list 2>&1 | grep -E "(pymssql|cx.Oracle|ibm.db|psycopg)"
-```
-
----
-
-### Git-Sync Init Containers Fail
-
-**Symptoms:** Airflow pods stuck in `Init:Error` or `Init:CrashLoopBackOff`.
-
-```bash
-kubectl logs -n $NAMESPACE <pod-name> -c git-sync-init
-```
-
-**Common cause:** The DAG repository is empty or missing the `main` branch. The DAG repo MUST be initialized with at least one commit on the `main` branch BEFORE Helm install (Step 17).
-
-**Fix:** Initialize the DAG repository, then restart the failed pods:
-
-```bash
-kubectl delete pods -n $NAMESPACE -l component=dag-processor
-kubectl delete pods -n $NAMESPACE -l component=scheduler
-```
-
----
-
-### Namespace Stuck in Terminating
-
-```bash
-kubectl get namespace $NAMESPACE -o json | jq '.spec.finalizers = []' | \
-  kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f -
-```
-
----
-
-### ImagePullBackOff
-
-```bash
-kubectl get secret datasurface-registry -n $NAMESPACE
-kubectl get sa default -n $NAMESPACE -o yaml | grep imagePullSecrets
-```
-
-If the secret or imagePullSecrets binding is missing, re-run Step 16.
-
----
-
-## Key Differences: Local vs AWS
-
-| Aspect | Local (Docker Desktop) | AWS (EKS) |
-|--------|----------------------|-----------|
-| Database | Docker Compose PostgreSQL | Aurora RDS |
-| Secrets | Kubernetes secrets | AWS Secrets Manager + CSI driver |
-| Storage | standard/hostpath | EFS (efs-sc) |
-| Infrastructure | None | CloudFormation (2 stacks) |
-| Auth | None | IRSA (IAM Roles for Service Accounts) |
-| Airflow image | apache/airflow:3.1.7 | Standard if merge DB is PostgreSQL; custom if MSSQL/Oracle/DB2 |
-| Git cache | ReadWriteOnce | ReadWriteMany |
-| Network | localhost | VPC + security groups |
-| Node type | Docker Desktop | EC2 (m5.xlarge recommended) |
-| Cost | Free | ~$200-400/month (EKS + EC2 + Aurora + EFS) |
+Verify Airflow `3.3.x`, no import errors, successful ring 1 and infrastructure runs, Ready MCP and
+Airflow pods, stable restarts, and no unresolved warning events. Discover generated SCD4 DAG IDs
+from Airflow; do not rely on a historical fixed list.
+
+## Optional: enable ESO for a customer
+
+Only when requested:
+
+1. set `externalSecretProvider="aws"` in `rte_aws.py`;
+2. install External Secrets Operator;
+3. provision a dedicated, read-only IAM role scoped to the ESO service account and only this
+   environment's `datasurface/...` secret prefix;
+4. create a namespaced `SecretStore` named `datasurface-runtime-secrets`;
+5. put canonical credential JSON at
+   `datasurface/<normalized-namespace>/<normalized-ecosystem>/<credential>`;
+6. regenerate/apply bootstrap and wait for every generated `ExternalSecret` to become Ready.
+
+Use `create-k8-credential` for the exact keys and remote naming. Do not give Airflow pods direct
+Secrets Manager permissions.
+
+## Simulator and teardown
+
+After the source database and source credential exist, use `create-customer-data-simulator`.
+For removal, use `teardown-walkthrough-aws`; it includes cost-bearing resource checks and optional
+ESO cleanup without assuming ESO was installed.
