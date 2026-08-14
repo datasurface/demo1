@@ -1,5 +1,5 @@
 ---
-name: Check System Health
+name: check-system-health
 description: Diagnose DataSurface system health when user asks "how's it doing?", "what's wrong?", "does it look ok?", or any variation of system status inquiry. Runs batch throughput analysis, database health checks, and compares against expected baselines.
 ---
 # Check System Health
@@ -191,7 +191,23 @@ WHERE lock_escalation_desc != 'DISABLE';
 ```
 - Should return 0 rows. Any table without `DISABLE` can cause deadlocks under concurrent load.
 
-## Step 5: Airflow Health (if accessible)
+## Step 5: Kubernetes Cache Health
+
+The current model-loading path requires two separate shared cache claims. For demo1 defaults:
+
+```bash
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n <namespace> \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
+```
+
+Both must be `Bound`, `ReadWriteMany`, and use the storage class selected by `GitCacheConfig`.
+`git-cache-pvc` stores source checkouts; `git-cache-pvc-compiled-models` stores trusted compiled
+artifacts. A missing/Pending compiled claim blocks model-publish or runtime model loading even when
+the source cache is healthy. Do not combine the claims: model-publish is the compiled claim's only
+read/write user and normal runtime jobs mount it read-only.
+
+## Step 6: Airflow Health (if accessible)
 
 ```bash
 # Check for failed/stuck DAG runs
@@ -206,7 +222,7 @@ If Airflow UI is available (port-forward or ingress), check for:
 - DAGs stuck in "queued" state (scheduler bottleneck)
 - 500 errors on the UI (PgBouncer or auth issues — see `troubleshoot-airflow` skill)
 
-## Step 6: Report
+## Step 7: Report
 
 Present findings as a health report:
 
@@ -226,6 +242,8 @@ Buffer Hit:   ✅ <N>%
 Dead Tuples:  ✅ max ratio <N> on <table>
 Temp Files:   ✅ none
 Host Load:    ✅ <N> on <cores> cores
+Source Cache: ✅ Bound / RWX / <storage-class>
+Model Cache:  ✅ Bound / RWX / <storage-class>
 
 Issues Found:
   - <issue 1> → see <skill> skill

@@ -89,6 +89,24 @@ python -m py_compile "generated_output/$PSP_NAME"/*_dag.py
 The standalone model-merge Job is obsolete. Current model merge is the plan/publish sequence
 inside the generated `<psp>_infrastructure` DAG.
 
+When `GitCacheConfig.enabled=True`, `kubernetes-bootstrap.yaml` must render two distinct PVCs. For
+demo1's default `pvc_name`, verify both names:
+
+```bash
+BOOTSTRAP_RESOURCES=$(kubectl create --dry-run=client \
+  -f "generated_output/$PSP_NAME/kubernetes-bootstrap.yaml" -o name)
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc'
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc-compiled-models'
+```
+
+The claims inherit the same size, storage class, and `ReadWriteMany` mode from `GitCacheConfig`,
+but they are not interchangeable. `git-cache-pvc` is the source-checkout cache.
+`git-cache-pvc-compiled-models` is the trusted artifact cache: model-plan cannot mount it,
+model-publish is its sole read/write user, and runtime jobs mount it read-only. When `pvc_name` is
+customized, DataSurface derives the Kubernetes-stable form of `<pvc-name>-compiled-models`.
+
 When `externalSecretProvider=None`, the generated YAML must not contain `ExternalSecret`,
 `SecretStore`, or `ClusterSecretStore` resources:
 
@@ -131,6 +149,12 @@ Apply the bootstrap manifest, then recreate ring 1:
 
 ```bash
 kubectl apply -f "generated_output/$PSP_NAME/kubernetes-bootstrap.yaml"
+kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/git-cache-pvc pvc/git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" --timeout=300s
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
 kubectl rollout status deployment/demo-psp-mcp-server \
   -n "$NAMESPACE" --timeout=300s
 
@@ -169,5 +193,8 @@ Wait for the new infrastructure DAG run to reach `success`. Do not apply or wait
 - DAG import error: inspect `airflow dags list-import-errors` before triggering infrastructure.
 - Ring 1 failure: inspect the Job logs and Kubernetes events; do not trigger infrastructure until
   ring 1 completes.
+- Missing or Pending compiled-model claim: confirm the generated bootstrap contains both PVCs,
+  then inspect the selected RWX provisioner and claim events. Do not create an ad hoc claim, reuse
+  the source-cache volume, or expose the trusted volume to model-plan.
 - Infrastructure failure: inspect the Airflow task logs. Plan, optional ESO reconcile, and publish
   are tasks in the DAG, not separate bootstrap Jobs.

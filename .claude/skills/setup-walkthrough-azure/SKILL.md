@@ -10,7 +10,7 @@ The starter path uses:
 - DataSurface `1.8.4`;
 - Airflow `3.3.0` with the supported merge-database drivers;
 - AKS, PostgreSQL Flexible Server for Airflow metadata, and Azure SQL for the merge database;
-- Azure Files NFS for RWX git cache/log storage;
+- Azure Files NFS for both RWX cache claims and log storage;
 - SCD4 platform `Demo_PSP`;
 - administrator-managed namespace-local Kubernetes Secrets;
 - ring 1 bootstrap followed by model merge through `demo-psp_infrastructure`.
@@ -262,6 +262,10 @@ kubectl delete pvc datasurface-rwx-test
 ```
 
 Current git cache lint requires `ReadWriteMany`; do not substitute an RWO disk class.
+`GitCacheConfig` now provisions two claims through this class: `git-cache-pvc` for source
+checkouts and `git-cache-pvc-compiled-models` for trusted compiled artifacts. Both use the same
+configured size and storage class. Only model-publish writes the compiled-model claim; runtime
+jobs consume it read-only.
 
 ## 4. Configure the model and temporary Helm values
 
@@ -425,10 +429,20 @@ for file in generated_output/Demo_PSP/*.yaml; do
   kubectl apply --dry-run=client -f "$file" >/dev/null
 done
 python -m py_compile generated_output/Demo_PSP/*_dag.py
+
+BOOTSTRAP_RESOURCES=$(kubectl create --dry-run=client \
+  -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml -o name)
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc'
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc-compiled-models'
 ```
 
 With `externalSecretProvider=None`, `kubernetes-bootstrap.yaml` must not contain
 `kind: ExternalSecret`.
+
+Do not hand-create or combine the two claims. If `GitCacheConfig.pvc_name` is customized, the
+compiled claim is derived as the Kubernetes-stable form of `<pvc-name>-compiled-models`.
 
 ## 8. Publish generated DAGs before Airflow starts
 
@@ -497,6 +511,12 @@ Airflow service accounts need no Azure Workload Identity annotations in this pat
 
 ```bash
 kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/git-cache-pvc pvc/git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" --timeout=300s
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
 kubectl rollout status deployment/demo-psp-mcp-server \
   -n "$NAMESPACE" --timeout=300s
 
@@ -533,7 +553,9 @@ kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
 
 Verify Airflow `3.3.x`, no import errors, successful ring 1 and infrastructure runs, Ready MCP and
 Airflow pods, stable restarts, private database DNS/connectivity, and no unresolved warning events.
-Discover generated SCD4 DAG IDs from Airflow; do not rely on a historical fixed list.
+Require both cache claims to be Bound with `ReadWriteMany` and `azurefile-csi-nfs`; do not continue
+when only the Git-checkout claim is available. Discover generated SCD4 DAG IDs from Airflow; do
+not rely on a historical fixed list.
 
 ## Optional: enable ESO for a customer
 

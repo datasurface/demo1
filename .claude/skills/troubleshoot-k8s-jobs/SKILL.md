@@ -13,7 +13,7 @@ standalone Job; it runs as tasks in `demo-psp_infrastructure`.
 ```bash
 export NAMESPACE="${NAMESPACE:-demo1}"
 
-kubectl get jobs,pods -n "$NAMESPACE" -o wide
+kubectl get jobs,pods,pvc -n "$NAMESPACE" -o wide
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
 kubectl describe job demo-psp-ring1-init -n "$NAMESPACE"
@@ -112,13 +112,37 @@ kubectl get secret,configmap,pvc,serviceaccount -n "$NAMESPACE"
 
 Fix the missing dependency at its declared source. Do not hand-edit the pod; it will be recreated.
 
+## Cache PVC failures
+
+With demo1's default `GitCacheConfig`, a healthy namespace has two distinct RWX claims:
+
+```bash
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
+kubectl describe pvc git-cache-pvc -n "$NAMESPACE"
+kubectl describe pvc git-cache-pvc-compiled-models -n "$NAMESPACE"
+```
+
+Both claims inherit their size, storage class, and `ReadWriteMany` mode from one
+`GitCacheConfig`. `git-cache-pvc` holds source checkouts. `git-cache-pvc-compiled-models` is the
+trusted compiled-artifact volume. Do not merge them or manually patch pod mounts:
+
+- model-plan intentionally has no compiled-model volume;
+- model-publish is the sole read/write compiled-model user;
+- ingestion, CQRS, reconcile, and DataTransformer jobs mount compiled models read-only.
+
+If the compiled claim is missing, regenerate and apply `kubernetes-bootstrap.yaml`. If it is
+Pending, inspect its events and the RWX provisioner. A working source-cache claim does not prove
+the compiled claim is provisioned.
+
 ## Git loader failures
 
 Check only repository identity and Secret key names:
 
 ```bash
 kubectl describe secret git -n "$NAMESPACE"
-kubectl get pvc -n "$NAMESPACE"
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models -n "$NAMESPACE"
 kubectl logs -n "$NAMESPACE" "<pod-name>" --all-containers --tail=200 |
   rg -i 'git|release|tag|clone|credential'
 ```

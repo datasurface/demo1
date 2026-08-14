@@ -8,7 +8,7 @@ description: Set up demo1 on a remote self-managed Kubernetes cluster over SSH w
 This path adapts the local demo1 setup to a cluster reached over SSH. It uses:
 
 - separate external PostgreSQL databases for Airflow metadata and DataSurface merge data;
-- a storage class that supports `ReadWriteMany` for the shared Git cache;
+- a storage class that supports `ReadWriteMany` for both shared cache claims;
 - Airflow 3.3 with the tested DataSurface Airflow image;
 - namespace-local Kubernetes Secrets by default;
 - current ring-0 artifacts and infrastructure-DAG model merge.
@@ -104,7 +104,7 @@ Update:
   Git cache, selected storage class, and DataSurface image `v1.8.4`;
 - `requirements.txt`: `datasurface==1.8.4`.
 
-The Git cache must remain shared:
+Both cache claims must remain shared. They are controlled by one `GitCacheConfig`:
 
 ```python
 git_config=GitCacheConfig(
@@ -113,6 +113,16 @@ git_config=GitCacheConfig(
     storageClass="<rwx-storage-class>",
 )
 ```
+
+With the default `pvc_name`, bootstrap renders:
+
+- `git-cache-pvc` for source checkouts;
+- `git-cache-pvc-compiled-models` for validated compiled artifacts.
+
+They use the same configured size, RWX access mode, and storage class, but they must remain
+separate volumes. Model-publish is the compiled claim's only read/write user; runtime jobs mount
+it read-only. If `pvc_name` changes, DataSurface derives and Kubernetes-normalizes
+`<pvc-name>-compiled-models`.
 
 Keep the RTE's `externalSecretProvider=None`.
 
@@ -155,6 +165,20 @@ demo_psp_infrastructure_dag.py
 demo_psp_ring1_init_job.yaml
 demo_psp_reconcile_views_job.yaml
 ```
+
+Also require `kubernetes-bootstrap.yaml` to contain both cache claims. From the local operator
+machine:
+
+```bash
+BOOTSTRAP_RESOURCES=$(kubectl create --dry-run=client \
+  -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml -o name)
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc'
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc-compiled-models'
+```
+
+Do not manually create the compiled-model PVC or reuse the Git-checkout claim.
 
 Publish every generated `*_dag.py` to the DAG repository before installing Airflow. Ensure its
 `main` branch exists so git-sync can start.
@@ -328,6 +352,12 @@ $SCP_CMD generated_output/Demo_PSP/*.yaml \
   "$SSH_USER@$SSH_HOST:/tmp/"
 
 $SSH_CMD "kubectl apply -f /tmp/kubernetes-bootstrap.yaml"
+$SSH_CMD "kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/git-cache-pvc pvc/git-cache-pvc-compiled-models \
+  -n '$NAMESPACE' --timeout=300s"
+$SSH_CMD "kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n '$NAMESPACE' \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'"
 $SSH_CMD "kubectl rollout status deployment/demo-psp-mcp-server \
   -n '$NAMESPACE' --timeout=300s"
 
@@ -369,8 +399,10 @@ $SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version"
 ```
 
-Require Airflow 3.3.x, Ready core pods, a bound RWX Git-cache PVC, a completed ring-1 Job, no DAG
-import errors, and a successful infrastructure run.
+Require Airflow 3.3.x, Ready core pods, both cache PVCs Bound with RWX and the configured storage
+class, a completed ring-1 Job, no DAG import errors, and a successful infrastructure run. A bound
+`git-cache-pvc` does not make the environment ready when `git-cache-pvc-compiled-models` is absent
+or Pending.
 
 Access the UI through an SSH tunnel:
 

@@ -103,6 +103,12 @@ RTE. It will:
 5. recreate and wait for ring 1;
 6. trigger `demo-psp_infrastructure`.
 
+For versions with compiled-model artifacts, the regenerated `kubernetes-bootstrap.yaml` adds a
+second PVC derived from `GitCacheConfig.pvc_name`. With demo1 defaults, require both
+`git-cache-pvc` and `git-cache-pvc-compiled-models`. They share the configured size, storage class,
+and RWX mode but must remain separate; applying the bootstrap is the supported way to add the new
+claim to an existing environment.
+
 Current versions do not generate `demo_psp_model_merge_job.yaml`. Model merge runs within the
 infrastructure DAG.
 
@@ -118,6 +124,12 @@ kubectl get pods -n "$NAMESPACE" \
 Then verify:
 
 ```bash
+kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/git-cache-pvc pvc/git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" --timeout=300s
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
 kubectl get jobs -n "$NAMESPACE"
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
@@ -130,9 +142,9 @@ kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```
 
-Require a completed ring-1 Job, no DAG import errors, a successful new infrastructure run, and
-healthy model-derived DAGs. Use `check-system-health` and `verify-data-fidelity` before declaring
-the upgrade complete.
+Require both cache PVCs Bound with RWX before triggering infrastructure. Then require a completed
+ring-1 Job, no DAG import errors, a successful new infrastructure run, and healthy model-derived
+DAGs. Use `check-system-health` and `verify-data-fidelity` before declaring the upgrade complete.
 
 Report the old and new versions, model release, registry digest, environments rendered,
 infrastructure run status, live pod image IDs, and any test or verification that could not run.

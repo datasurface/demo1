@@ -11,6 +11,7 @@ This is the current Docker Desktop path for the `demo1` model. It uses:
 - Airflow `3.3.0`;
 - SCD4 platform `Demo_PSP`;
 - Docker Compose PostgreSQL for Airflow metadata and the merge database;
+- two shared RWX cache PVCs: one for Git checkouts and one for trusted compiled models;
 - direct namespace-local Kubernetes Secrets;
 - ring 1 bootstrap followed by model merge through `demo-psp_infrastructure`.
 
@@ -58,10 +59,18 @@ Discover a shared storage class:
 kubectl get storageclass
 ```
 
-Current DataSurface git cache lint requires `ReadWriteMany`. Select a Docker Desktop storage class
-that supports RWX and use it consistently in `rte_demo.py` and the Airflow values. The checked-in
-starter uses `standard` for the git cache and `hostpath` for logs; adjust those names if the local
-cluster differs.
+Current DataSurface git cache lint requires `ReadWriteMany`. One `GitCacheConfig` now renders two
+claims with the same size, storage class, and access mode:
+
+- `git-cache-pvc` stores Git checkouts and may be refreshed by model-loading paths;
+- `git-cache-pvc-compiled-models` stores validated compiled artifacts. Model-publish is its only
+  read/write user; ingestion, CQRS, reconcile, and DataTransformer jobs mount it read-only.
+
+Select a Docker Desktop storage class that supports two concurrent RWX claims and use it
+consistently in `rte_demo.py` and the Airflow values. The checked-in starter uses `standard` for
+both cache claims and `hostpath` for logs; adjust those names if the local cluster differs. If
+`GitCacheConfig.pvc_name` is customized, the compiled claim is the Kubernetes-stable form of
+`<pvc-name>-compiled-models`.
 
 ## 1. Optional clean rebuild
 
@@ -248,7 +257,17 @@ for file in generated_output/Demo_PSP/*.yaml; do
   kubectl apply --dry-run=client -f "$file" >/dev/null
 done
 python -m py_compile generated_output/Demo_PSP/*_dag.py
+
+BOOTSTRAP_RESOURCES=$(kubectl create --dry-run=client \
+  -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml -o name)
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc'
+printf '%s\n' "$BOOTSTRAP_RESOURCES" | grep -Fx \
+  'persistentvolumeclaim/git-cache-pvc-compiled-models'
 ```
+
+Both claims must come from the generated bootstrap. Do not hand-create the compiled-model claim
+or point it at the Git-checkout volume; the separate claim is the model-publish trust boundary.
 
 ## 7. Publish every generated DAG
 
@@ -324,6 +343,12 @@ YAML
 
 ```bash
 kubectl apply -f generated_output/Demo_PSP/kubernetes-bootstrap.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/git-cache-pvc pvc/git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" --timeout=300s
+kubectl get pvc git-cache-pvc git-cache-pvc-compiled-models \
+  -n "$NAMESPACE" \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,ACCESS:.status.accessModes[*],CLASS:.spec.storageClassName,CAPACITY:.status.capacity.storage'
 kubectl rollout status deployment/demo-psp-mcp-server \
   -n "$NAMESPACE" --timeout=300s
 
@@ -376,6 +401,8 @@ Expected invariants:
 - no DAG import errors;
 - `demo-psp_infrastructure` most recent run succeeded;
 - the ring 1 Job completed;
+- both `git-cache-pvc` and `git-cache-pvc-compiled-models` are Bound, RWX, and use the configured
+  cache storage class;
 - MCP and Airflow core pods are Ready with stable restart counts;
 - generated runtime DAG IDs use SCD4/model-derived names. Discover them from `airflow dags list`;
   do not assert an old fixed list.
@@ -396,8 +423,11 @@ ready, use `create-customer-data-simulator`. It deploys the current
 
 ## Troubleshooting
 
-- Model lint rejects `ReadWriteOnce`: switch the git-cache PVC to a RWX-capable storage class and
-  `ReadWriteMany`.
+- Model lint rejects `ReadWriteOnce`: switch the `GitCacheConfig` to a RWX-capable storage class
+  and `ReadWriteMany`; this controls both cache PVCs.
+- `git-cache-pvc-compiled-models` is missing or Pending: regenerate and apply
+  `kubernetes-bootstrap.yaml`, then inspect the selected storage class and provisioner events. Do
+  not reuse `git-cache-pvc` or manually add the compiled mount to model-plan.
 - `ImagePullBackOff`: inspect `datasurface-registry` and the target service account's
   `imagePullSecrets`.
 - ring 1 fails: inspect its retained Job pod and logs; verify Git and merge Secrets by key name.
