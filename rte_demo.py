@@ -57,7 +57,7 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         yp_assembly=yp_assembly,
         merge_datacontainer=k8s_merge_datacontainer,
         pv_storage_class="standard",
-        datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4",
+        datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4",
         dataPlatforms=[
             YellowDataPlatform(
                 "SCD4",

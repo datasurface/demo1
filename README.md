@@ -19,7 +19,7 @@ export GITHUB_USERNAME="your-github-username"
 export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.8.4"
+export DATASURFACE_VERSION="1.15.4"
 ```
 
 ## Setup
@@ -33,7 +33,9 @@ cd demo1
 
 Then follow the guided walkthrough for the target environment. Each walkthrough verifies the
 current Airflow 3.3/SCD4 bootstrap sequence and uses administrator-managed Kubernetes Secrets by
-default.
+default. Airflow is installed with the pinned Apache chart `1.22.0` through
+`helm/apply-airflow.sh`; multi-node walkthroughs derive a baseline Celery worker count from the
+nodes eligible for Airflow and spread workers across hosts.
 
 ### Local Docker Desktop
 
@@ -90,7 +92,10 @@ The starter model uses **SCD4 milestoning** (a current-snapshot table plus a sep
 ├── docker/
 │   └── postgres/            # PostgreSQL compose setup
 ├── helm/
-│   └── airflow-values.yaml  # Airflow Helm values for Docker Desktop
+│   ├── airflow-values.yaml  # Airflow Helm values for Docker Desktop
+│   ├── airflow-values-aws.yaml
+│   ├── airflow-values-azure.yaml
+│   └── apply-airflow.sh     # Pinned, upgrade-safe Airflow installer
 ├── generated_output/        # Generated after running bootstrap (gitignored)
 │   └── Demo_PSP/
 │       ├── kubernetes-bootstrap.yaml

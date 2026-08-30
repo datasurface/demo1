@@ -27,7 +27,7 @@ You need GitLab registry credentials:
 ```bash
 export GITLAB_CUSTOMER_USER="your-deploy-token-username"
 export GITLAB_CUSTOMER_TOKEN="your-deploy-token"
-export DATASURFACE_VERSION="1.8.4"
+export DATASURFACE_VERSION="1.15.4"
 ```
 
 ### 2. Login to GitLab Registry
@@ -67,7 +67,7 @@ docker images | grep datasurface
 Expected output:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.8.4   abc123def456   2 days ago   1.2GB
+registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.15.4  abc123def456   2 days ago   1.2GB
 ```
 
 ## Quick One-Liner
@@ -103,7 +103,7 @@ Error response from daemon: manifest for ... not found
 
 ```bash
 # Use the repository's tested version
-export DATASURFACE_VERSION="1.8.4"
+export DATASURFACE_VERSION="1.15.4"
 ```
 
 ### Pulling Latest Version

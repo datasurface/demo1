@@ -24,10 +24,10 @@ For infrastructure/model-merge failures, inspect Airflow rather than looking for
 `demo-psp-model-merge-job`:
 
 ```bash
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
 ```
@@ -93,7 +93,7 @@ Recreate the registry Secret with `setup-k8s-registry-secret` when authenticatio
 Confirm the exact pinned image exists:
 
 ```bash
-export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4"
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4"
 printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
   docker login registry.gitlab.com \
     --username "$GITLAB_CUSTOMER_USER" --password-stdin

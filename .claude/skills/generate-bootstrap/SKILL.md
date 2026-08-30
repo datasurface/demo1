@@ -14,7 +14,7 @@ environment. Current images expose the bootstrap CLI at
 Confirm these values before running commands:
 
 ```bash
-export DATASURFACE_VERSION="1.8.4"
+export DATASURFACE_VERSION="1.15.4"
 export MODEL_DIR="$(pwd)"
 export PSP_NAME="Demo_PSP"
 export RTE_NAME="demo"       # demo1 keeps this RTE name for local, AWS, and Azure
@@ -170,14 +170,14 @@ Wait for git-sync and DAG parsing, then trigger infrastructure/model merge with 
 scheduler:
 
 ```bash
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```

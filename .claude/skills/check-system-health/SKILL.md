@@ -211,11 +211,24 @@ read/write user and normal runtime jobs mount it read-only.
 
 ```bash
 # Check for failed/stuck DAG runs
-kubectl exec -n <namespace> <scheduler-pod> -- airflow dags list-runs -s failed --limit 20
+kubectl exec -n <namespace> deployment/airflow-scheduler -c scheduler -- \
+  airflow dags list-runs -s failed --limit 20
 
 # Check scheduler heartbeat
-kubectl logs -n <namespace> <scheduler-pod> --tail=20
+kubectl logs -n <namespace> deployment/airflow-scheduler -c scheduler --tail=20
+
+# Executor, worker placement, resource QoS, restarts, and OOM evidence
+kubectl exec -n <namespace> deployment/airflow-scheduler -c scheduler -- \
+  airflow config get-value core executor
+kubectl get pods -n <namespace> -l component=worker -o wide
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=airflow \
+  -o custom-columns='NAME:.metadata.name,QOS:.status.qosClass,RESTARTS:.status.containerStatuses[*].restartCount,LAST_REASON:.status.containerStatuses[*].lastState.terminated.reason'
 ```
+
+For a multi-node starter deployment, require `CeleryExecutor`, the expected number of Ready
+workers spread across eligible nodes, non-BestEffort core pods, stable restart counts, and no new
+`OOMKilled` termination. KubernetesPodOperator job pods are scheduled separately by Kubernetes;
+historical failed pods are not evidence that the current run is unhealthy.
 
 If Airflow UI is available (port-forward or ingress), check for:
 - Red/failed DAG runs
@@ -244,6 +257,7 @@ Temp Files:   ✅ none
 Host Load:    ✅ <N> on <cores> cores
 Source Cache: ✅ Bound / RWX / <storage-class>
 Model Cache:  ✅ Bound / RWX / <storage-class>
+Airflow:      ✅ CeleryExecutor / <workers> Ready / <nodes> nodes / no OOM
 
 Issues Found:
   - <issue 1> → see <skill> skill

@@ -38,14 +38,14 @@ Use the Airflow 3 scheduler container for CLI commands:
 ```bash
 export NAMESPACE="${NAMESPACE:-demo1}"
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```
@@ -58,7 +58,7 @@ search for `demo-psp-model-merge-job`.
 List current DAGs after the infrastructure run:
 
 ```bash
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list --output json
 ```
@@ -78,9 +78,9 @@ Unpause or trigger a newly created data DAG only after confirming its source cre
 destination are ready:
 
 ```bash
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags unpause "<dag-id>"
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger "<dag-id>"
 ```
 

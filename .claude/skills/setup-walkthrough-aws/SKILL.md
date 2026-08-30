@@ -7,7 +7,7 @@ description: Set up demo1 on AWS EKS with RDS PostgreSQL, EFS, Airflow 3.3, admi
 
 The starter path uses:
 
-- DataSurface `1.8.4`;
+- DataSurface `1.15.4`;
 - Airflow `3.3.0`;
 - EKS, RDS PostgreSQL, and EFS for both shared cache claims;
 - SCD4 platform `Demo_PSP`;
@@ -36,7 +36,8 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 STACK_NAME=<short-stack-name>
 KEY_PAIR_NAME=<ec2-key-pair>
 NAMESPACE=${NAMESPACE:-demo1-aws}
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.8.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
 GITHUB_USERNAME=<github-user>
@@ -50,7 +51,7 @@ git status --short
 
 Also require `DATABASE_PASSWORD`, `AIRFLOW_ADMIN_PASSWORD`, `GITHUB_TOKEN`,
 `GITLAB_CUSTOMER_USER`, and `GITLAB_CUSTOMER_TOKEN` in the environment, plus `jq` and `python3` on
-the operator machine. Do not echo secret values.
+the operator machine. Also require `openssl`. Do not echo secret values.
 
 ## 1. Provision or reuse AWS infrastructure
 
@@ -212,7 +213,7 @@ Update:
 
 - `eco.py` to import `createDemoRTE` from `rte_aws` and use `MODEL_REPO`;
 - `rte_aws.py` placeholders for namespace, RDS PostgreSQL endpoint, and AWS account;
-- DataSurface image tag to `v1.8.4`;
+- DataSurface image tag to `v1.15.4`;
 - keep `externalSecretProvider=None`.
 
 Create a non-committed values file:
@@ -397,16 +398,27 @@ git -C "$DAG_CLONE" push origin main
 ## 8. Install Airflow 3.3 and secret-read RBAC
 
 ```bash
-helm repo add apache-airflow https://airflow.apache.org
-helm repo update apache-airflow
-helm upgrade --install airflow apache-airflow/airflow \
-  --namespace "$NAMESPACE" \
-  --values /tmp/airflow-values-aws.yaml \
-  --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --reset-values --timeout 20m --wait
+AIRFLOW_WORKER_REPLICAS=${AIRFLOW_WORKER_REPLICAS:-$(
+  kubectl get nodes -o json | jq '
+    [.items[]
+      | select(.spec.unschedulable != true)
+      | select(([.spec.taints[]?
+          | select(.effect == "NoSchedule" or .effect == "NoExecute")] | length) == 0)]
+    | length'
+)}
+test "$AIRFLOW_WORKER_REPLICAS" -ge 1
+
+export AIRFLOW_VALUES=/tmp/airflow-values-aws.yaml
+export NAMESPACE AIRFLOW_CHART_VERSION AIRFLOW_WORKER_REPLICAS
+export AIRFLOW_WORKER_CONCURRENCY=4
+helm/apply-airflow.sh
 rm -f /tmp/airflow-values-aws.yaml
 ```
+
+The default worker count follows the nodes currently eligible for untainted Airflow workers. For
+a dedicated or autoscaled node group, add its selector/tolerations to the values and set the
+desired baseline explicitly. Topology spreading distributes workers across eligible hosts; no
+customer topology is written into the generated infrastructure DAG.
 
 The generated Airflow secret manager reads namespace-local Kubernetes Secrets. Grant read-only
 access to Airflow component service accounts:
@@ -433,6 +445,7 @@ subjects:
   - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-api-server, namespace: ${NAMESPACE}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -461,12 +474,12 @@ kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
 kubectl wait --for=condition=complete \
   job/demo-psp-ring1-init -n "$NAMESPACE" --timeout=300s
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```
@@ -480,14 +493,15 @@ Wait for the new infrastructure run to reach `success`. Do not apply a
 kubectl get pods -n "$NAMESPACE" -o wide
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
 ```
 
-Verify Airflow `3.3.x`, no import errors, successful ring 1 and infrastructure runs, Ready MCP and
-Airflow pods, stable restarts, and no unresolved warning events. Require both cache claims to be
+Verify Airflow `3.3.x` with `CeleryExecutor`, one Ready worker on each expected eligible node, no
+import errors, successful ring 1 and infrastructure runs, Ready MCP and Airflow pods, stable
+restarts, and no unresolved warning events. Require both cache claims to be
 Bound with `ReadWriteMany` and `efs-sc`; a bound Git-checkout claim does not compensate for a
 missing compiled-model claim. Discover generated SCD4 DAG IDs from Airflow; do not rely on a
 historical fixed list.

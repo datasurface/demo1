@@ -2,6 +2,11 @@
 # Adapted from INSTALL_DATASURFACE.md for local development
 
 executor: CeleryExecutor
+enableServiceLinks: false
+
+# Kept outside Helm ownership by helm/apply-airflow.sh so upgrades do not
+# rotate the Airflow 3 API signing key.
+apiSecretKeySecretName: airflow-api-secret-key-external
 
 # Airflow version
 images:
@@ -20,43 +25,117 @@ postgresql:
 
 data:
   metadataSecretName: airflow-metadata
+  brokerUrlSecretName: airflow-broker-url
 
 # Redis for Celery broker
 redis:
   enabled: true
+  passwordSecretName: airflow-redis-password
   persistence:
     enabled: true
     storageClassName: standard
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Single scheduler for local dev
 scheduler:
   replicas: 1
+  serviceAccount:
+    create: true
+    name: airflow-scheduler
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 2Gi
   logGroomerSidecar:
     retentionDays: 2
 
 # Single worker for local dev
 workers:
-  replicas: 1
-  persistence:
-    enabled: true
-    storageClassName: standard
-  logGroomerSidecar:
-    retentionDays: 2
+  celery:
+    replicas: 1
+    serviceAccount:
+      create: true
+      name: airflow-worker
+    persistence:
+      enabled: true
+      storageClassName: standard
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: 1
+        memory: 2Gi
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            component: worker
+    logGroomerSidecar:
+      retentionDays: 2
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
 
 # API server with NodePort for local access
 apiServer:
+  serviceAccount:
+    create: true
+    name: airflow-api-server
   service:
     type: NodePort
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
 
 # DAG processor
 dagProcessor:
   enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-dag-processor
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 2Gi
   logGroomerSidecar:
     retentionDays: 2
 
 # Triggerer for async sensors
 triggerer:
   enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-triggerer
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
   logGroomerSidecar:
     retentionDays: 2
 
@@ -71,6 +150,7 @@ dags:
     subPath: dags
     wait: 60
     credentialsSecret: git-dags  # Secret must have GITSYNC_USERNAME and GITSYNC_PASSWORD keys
+    recommendedProbeSetting: true
 
 # Logs - enable persistence for Docker Desktop (hostpath works for single-node clusters with RWX)
 logs:
@@ -81,16 +161,20 @@ logs:
 
 config:
   core:
-    parallelism: "64"
+    parallelism: "4"
+    max_active_tasks_per_dag: "4"
+    dagbag_import_timeout: "90"
+  dag_processor:
+    dag_file_processor_timeout: "120"
   celery:
     worker_concurrency: "4"
   logging:
     delete_local_logs: "False"
   scheduler:
     dag_dir_list_interval: "60"
-    max_tis_per_query: "512"
-    max_dagruns_to_create_per_loop: "100"
-    max_dagruns_per_loop_to_schedule: "200"
+    max_tis_per_query: "4"
+    max_dagruns_to_create_per_loop: "16"
+    max_dagruns_per_loop_to_schedule: "32"
 
 # Cleanup CronJob - purges old metadata to prevent scheduler slowdown
 # With many DAGs on frequent schedules, dag_run and task_instance tables grow rapidly
@@ -98,6 +182,22 @@ cleanup:
   enabled: true
   schedule: "*/30 * * * *"
   args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+statsd:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
 
 # PgBouncer connection pooler - transaction mode returns connections to the pool
 # after each transaction, preventing stale connection issues after DB restarts
@@ -107,8 +207,14 @@ pgbouncer:
   resultBackendPoolSize: 10
   maxClientConn: 200
   extraIni: |
-    pool_mode = transaction
     server_reset_query = DISCARD ALL
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Web UI credentials
 webserver:

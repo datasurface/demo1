@@ -23,9 +23,9 @@ When every DAG fails at once, it's infrastructure — not a code bug.
 ### Step 1: Check worker logs for the root cause
 
 ```bash
-for i in 0 1 2 3 4; do
-  echo "=== worker-$i ==="
-  kubectl logs -n $NAMESPACE airflow-worker-$i -c worker --tail=5 2>&1 | \
+for worker_pod in $(kubectl get pods -n "$NAMESPACE" -l component=worker -o name); do
+  echo "=== $worker_pod ==="
+  kubectl logs -n "$NAMESPACE" "$worker_pod" -c worker --tail=5 2>&1 | \
     grep -E "error|Error|ERROR|No space|OSError|Signature|auth" | head -3
 done
 ```
@@ -88,8 +88,9 @@ cleanup:
   schedule: "*/30 * * * *"
 
 workers:
-  logGroomerSidecar:
-    retentionDays: 2
+  celery:
+    logGroomerSidecar:
+      retentionDays: 2
 scheduler:
   logGroomerSidecar:
     retentionDays: 2
@@ -125,7 +126,8 @@ Symptoms: Workers log `Invalid auth token: Signature verification failed`. Tasks
 
 ### Cause
 
-Helm upgrades regenerate the JWT secret (`airflow-jwt-secret`). If components restart at different times, they have different secrets and can't authenticate with each other.
+Airflow components are using different API signing keys, usually because an upgrade rotated a
+chart-managed key while pods restarted at different times.
 
 ### Fix
 
@@ -138,10 +140,19 @@ kubectl rollout restart statefulset airflow-worker airflow-triggerer -n $NAMESPA
 
 ### Prevent
 
-Set a static webserver secret key in helm values to avoid regeneration on upgrades:
+Use the starter's external Airflow 3 API key and apply helper. It copies the old key during the
+first ownership transition and keeps subsequent upgrades stable:
 
 ```yaml
-webserverSecretKeySecretName: airflow-api-secret-key
+apiSecretKeySecretName: airflow-api-secret-key-external
+```
+
+```bash
+export AIRFLOW_VALUES=<rendered-values-for-this-environment>
+export AIRFLOW_WORKER_REPLICAS=<current-approved-worker-count>
+export AIRFLOW_WORKER_CONCURRENCY=<current-approved-worker-concurrency>
+export NAMESPACE
+helm/apply-airflow.sh
 ```
 
 ---
@@ -168,11 +179,13 @@ Use transaction mode (not session mode) in helm values:
 pgbouncer:
   enabled: true
   extraIni: |
-    pool_mode = transaction
     server_reset_query = DISCARD ALL
 ```
 
-Transaction mode returns connections to the pool after each transaction, so stale connections are detected and discarded on the next health check.
+Chart 1.22 already renders transaction mode. Do not repeat `pool_mode` in `extraIni`; duplicate
+entries make the effective configuration ambiguous. Transaction mode returns connections to the
+pool after each transaction, so stale connections are detected and discarded on the next health
+check.
 
 **Check current mode:**
 
@@ -360,7 +373,9 @@ Helm upgrades can cause cascading issues. Follow this checklist:
    kubectl get secret -n $NAMESPACE | grep airflow
    ```
 
-2. **Batch changes:** Don't do multiple helm upgrades in a debugging session. Combine changes into one upgrade.
+2. **Batch changes:** Don't do multiple Helm upgrades in a debugging session. Combine changes in
+   the rendered values and use `helm/apply-airflow.sh`, which pins chart `1.22.0` and preserves
+   the signing/broker Secrets.
 
 3. **After upgrading:** Verify all components can communicate
    ```bash
@@ -406,26 +421,27 @@ The bottleneck is usually `parallelism` (global max concurrent tasks) and/or `wo
 
 **Formula:** Effective capacity = `worker_concurrency` x `number of workers`
 
-This must be <= `parallelism`, and both must exceed your peak concurrent task count.
+Keep `parallelism`, the default pool, and effective worker capacity aligned unless load testing
+justifies a different queueing policy.
 
 ```bash
 # Check current settings
 helm get values airflow -n $NAMESPACE | grep -A2 "parallelism\|worker_concurrency"
 
-# Update via helm
-helm upgrade airflow apache-airflow/airflow -n $NAMESPACE \
-  -f <(helm get values airflow -n $NAMESPACE) \
-  --set config.core.parallelism=128 \
-  --set config.celery.worker_concurrency=8
+# Apply a reviewed capacity change through the pinned installer
+export AIRFLOW_VALUES=<rendered-values-for-this-environment>
+export AIRFLOW_WORKER_REPLICAS=5
+export AIRFLOW_WORKER_CONCURRENCY=4
+helm/apply-airflow.sh
 ```
 
 **Sizing guide:**
 
 | DAGs | Schedule | Recommended parallelism | worker_concurrency x workers |
 |------|----------|------------------------|------------------------------|
-| 50 | 1 min | 64 | 4 x 5 = 20 |
-| 200 | 1 min | 256 | 8 x 10 = 80 |
-| 50 | 5 min | 32 | 2 x 5 = 10 |
+| 50 | 1 min | 20 | 4 x 5 = 20 |
+| 200 | 1 min | 80 | 8 x 10 = 80 |
+| 50 | 5 min | 10 | 2 x 5 = 10 |
 
 ---
 
@@ -462,14 +478,15 @@ The scheduler processes task instances in batches controlled by `max_tis_per_que
 # In helm values under config.scheduler:
 config:
   scheduler:
-    max_tis_per_query: "512"              # Default 16 — batch more tasks per query
+    max_tis_per_query: "20"               # Match bounded executor parallelism
     max_dagruns_to_create_per_loop: "100"  # Default 10 — create more DAG runs per cycle
     max_dagruns_per_loop_to_schedule: "200" # Default 20 — evaluate more runs per cycle
 ```
 
-**Impact measured:** At 100 DAGs, first-task delay dropped from 66 sec to 7 sec after increasing `max_tis_per_query` from 16 to 512.
+Raise this in measured steps while watching metadata-database CPU and scheduler-loop latency.
 
-**Warning:** Setting `max_tis_per_query` too high can increase metadata DB query complexity. 512 is safe for most deployments. Do not exceed `parallelism`.
+**Warning:** Setting `max_tis_per_query` too high can increase metadata DB query complexity. Do
+not exceed `parallelism`; `helm/apply-airflow.sh` aligns them by default.
 
 ---
 

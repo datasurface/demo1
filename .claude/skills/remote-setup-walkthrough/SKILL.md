@@ -39,7 +39,8 @@ export MERGE_DB_HOST="<merge-postgres-host>"
 export PG_USER="<postgres-user>"
 export MODEL_REPO="<owner/model-repo>"
 export AIRFLOW_REPO="<owner/airflow-repo>"
-export DATASURFACE_VERSION="${DATASURFACE_VERSION:-1.8.4}"
+export DATASURFACE_VERSION="${DATASURFACE_VERSION:-1.15.4}"
+export AIRFLOW_CHART_VERSION="${AIRFLOW_CHART_VERSION:-1.22.0}"
 
 export SSH_CMD="ssh -i $SSH_KEY $SSH_USER@$SSH_HOST"
 export SCP_CMD="scp -i $SSH_KEY"
@@ -49,7 +50,8 @@ Also export these secret inputs without echoing them: `PG_PASSWORD`, `GITHUB_USE
 `GITHUB_MODEL_PULL_TOKEN`, `GITHUB_DAG_PULL_TOKEN`, `GITLAB_CUSTOMER_USER`, and
 `GITLAB_CUSTOMER_TOKEN`.
 
-Require `python3` locally to URI-encode the Airflow metadata credential safely.
+Require `python3`, `jq`, and `openssl` locally. The remote control host also needs `python3` and
+`openssl` for the idempotent Airflow signing/broker Secret setup.
 
 Verify access and current state:
 
@@ -101,8 +103,8 @@ Update:
 - `eco.py`: Git owner and repository;
 - `rte_demo.py`: namespace, merge host, and `MERGE_DBNAME` (set it to the merge database
   created in Step 1, e.g. `demo_merge`; the starter default is `merge_db`), `ReadWriteMany`
-  Git cache, selected storage class, and DataSurface image `v1.8.4`;
-- `requirements.txt`: `datasurface==1.8.4`.
+  Git cache, selected storage class, and DataSurface image `v1.15.4`;
+- `requirements.txt`: `datasurface==1.15.4`.
 
 Both cache claims must remain shared. They are controlled by one `GitCacheConfig`:
 
@@ -157,7 +159,7 @@ Use:
 python -m datasurface.entrypoints.platform generatePlatformBootstrap
 ```
 
-inside the `v1.8.4` image. Require these four artifacts:
+inside the `v1.15.4` image. Require these four artifacts:
 
 ```text
 kubernetes-bootstrap.yaml
@@ -215,6 +217,7 @@ helm repo add apache-airflow https://airflow.apache.org
 helm repo update apache-airflow
 helm template airflow apache-airflow/airflow \
   --namespace "$NAMESPACE" \
+  --version "$AIRFLOW_CHART_VERSION" \
   --values "$REMOTE_AIRFLOW_VALUES" >/tmp/demo1-airflow-rendered.yaml
 ```
 
@@ -295,21 +298,41 @@ Use `create-k8-credential` for additional datastore credentials.
 
 ## 7. Install Airflow
 
-Copy the temporary values and install:
+Derive a safe default of one worker per node eligible for untainted Airflow pods. Dedicated node
+pools require their selector/tolerations in the values and an explicit replica count.
+
+```bash
+AIRFLOW_WORKER_REPLICAS=${AIRFLOW_WORKER_REPLICAS:-$(
+  $SSH_CMD "kubectl get nodes -o json" | jq '
+    [.items[]
+      | select(.spec.unschedulable != true)
+      | select(([.spec.taints[]?
+          | select(.effect == "NoSchedule" or .effect == "NoExecute")] | length) == 0)]
+    | length'
+)}
+test "$AIRFLOW_WORKER_REPLICAS" -ge 1
+```
+
+Copy the temporary values and versioned installer, then install:
 
 ```bash
 $SCP_CMD "$REMOTE_AIRFLOW_VALUES" \
   "$SSH_USER@$SSH_HOST:/tmp/demo1-airflow-values.yaml"
+$SCP_CMD helm/apply-airflow.sh \
+  "$SSH_USER@$SSH_HOST:/tmp/demo1-apply-airflow.sh"
 
-$SSH_CMD "helm repo add apache-airflow https://airflow.apache.org &&
-  helm repo update apache-airflow &&
-  helm upgrade --install airflow apache-airflow/airflow \
-    --namespace '$NAMESPACE' \
-    --values /tmp/demo1-airflow-values.yaml \
-    --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
-    --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
-    --reset-values --timeout 20m --wait"
+$SSH_CMD "NAMESPACE='$NAMESPACE' \
+  AIRFLOW_VALUES=/tmp/demo1-airflow-values.yaml \
+  AIRFLOW_CHART_VERSION='$AIRFLOW_CHART_VERSION' \
+  AIRFLOW_WORKER_REPLICAS='$AIRFLOW_WORKER_REPLICAS' \
+  AIRFLOW_WORKER_CONCURRENCY=4 \
+  bash /tmp/demo1-apply-airflow.sh"
 ```
+
+The installer pins chart `1.22.0`, preserves the Airflow 3 API signing key, creates a matching
+Redis-password/broker-secret pair, aligns the default pool with worker capacity, and verifies the
+live executor. Topology spreading distributes workers across eligible hosts without putting
+customer node names or counts in DataSurface-generated DAGs.
 
 Airflow 3 uses `airflow-api-server` and `airflow-dag-processor`; do not wait for an Airflow 2
 webserver deployment.
@@ -338,6 +361,7 @@ subjects:
   - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-api-server, namespace: ${NAMESPACE}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -375,14 +399,14 @@ Do not apply a model-merge Job; the file no longer exists.
 ## 9. Trigger infrastructure/model merge
 
 ```bash
-$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+$SSH_CMD "kubectl exec -n '$NAMESPACE' deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json"
 
-$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+$SSH_CMD "kubectl exec -n '$NAMESPACE' deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure"
 
-$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+$SSH_CMD "kubectl exec -n '$NAMESPACE' deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json"
 ```
@@ -395,12 +419,13 @@ Wait for the new run to succeed, then discover the generated DAG IDs with `airfl
 $SSH_CMD "kubectl get pods,jobs,pvc -n '$NAMESPACE' -o wide"
 $SSH_CMD "kubectl get events -n '$NAMESPACE' \
   --field-selector type=Warning --sort-by=.lastTimestamp"
-$SSH_CMD "kubectl exec -n '$NAMESPACE' airflow-scheduler-0 -c scheduler -- \
+$SSH_CMD "kubectl exec -n '$NAMESPACE' deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version"
 ```
 
-Require Airflow 3.3.x, Ready core pods, both cache PVCs Bound with RWX and the configured storage
-class, a completed ring-1 Job, no DAG import errors, and a successful infrastructure run. A bound
+Require Airflow 3.3.x with `CeleryExecutor`, one Ready worker on each expected eligible node,
+Ready core pods, both cache PVCs Bound with RWX and the configured storage class, a completed
+ring-1 Job, no DAG import errors, and a successful infrastructure run. A bound
 `git-cache-pvc` does not make the environment ready when `git-cache-pvc-compiled-models` is absent
 or Pending.
 

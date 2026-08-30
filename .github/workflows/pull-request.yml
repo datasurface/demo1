@@ -54,5 +54,5 @@ jobs:
           -v ${{ github.workspace }}/pr:/workspace/pr \
           -e HEAD_REPOSITORY="${{ github.event.pull_request.head.repo.full_name }}" \
           -e HEAD_BRANCH="${{ github.event.pull_request.head.ref }}" \
-          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4 \
+          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4 \
           python -m datasurface.entrypoints.action /workspace/main /workspace/pr ${{ steps.check_label.outputs.ALLOW_BREAKS }}

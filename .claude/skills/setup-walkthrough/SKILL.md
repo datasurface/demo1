@@ -7,7 +7,7 @@ description: Set up the demo1 DataSurface Yellow SCD4 environment on Docker Desk
 
 This is the current Docker Desktop path for the `demo1` model. It uses:
 
-- DataSurface `1.8.4`;
+- DataSurface `1.15.4`;
 - Airflow `3.3.0`;
 - SCD4 platform `Demo_PSP`;
 - Docker Compose PostgreSQL for Airflow metadata and the merge database;
@@ -31,7 +31,8 @@ the split plan → publish flow (and plan → ESO reconcile → publish on cloud
 
 ```bash
 NAMESPACE=${NAMESPACE:-demo1}
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.8.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
 GITHUB_USERNAME=<github-user>
@@ -46,7 +47,7 @@ git status --short
 Require:
 
 - Docker Desktop Kubernetes;
-- `kubectl`, `helm`, `git`, `jq`, and `python3`;
+- `kubectl`, `helm`, `git`, `jq`, `python3`, and `openssl`;
 - a GitHub token with read/write access to the model and DAG repositories;
 - GitLab registry credentials that can pull DataSurface images.
 
@@ -119,13 +120,13 @@ Update:
 The checked-in baseline is:
 
 ```python
-DATASURFACE_VERSION = "1.8.4"
+DATASURFACE_VERSION = "1.15.4"
 ```
 
 and:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4
+registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4
 ```
 
 Validate before publishing:
@@ -292,18 +293,17 @@ git-sync has a valid remote ref.
 ## 8. Install Airflow 3.3
 
 ```bash
-helm repo add apache-airflow https://airflow.apache.org
-helm repo update apache-airflow
-
-helm upgrade --install airflow apache-airflow/airflow \
-  --namespace "$NAMESPACE" \
-  --values helm/airflow-values.yaml \
-  --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --reset-values \
-  --timeout 20m \
-  --wait
+export AIRFLOW_VALUES=helm/airflow-values.yaml
+export NAMESPACE AIRFLOW_CHART_VERSION
+export AIRFLOW_WORKER_REPLICAS=1
+export AIRFLOW_WORKER_CONCURRENCY=4
+helm/apply-airflow.sh
 ```
+
+The helper pins chart `1.22.0`, renders before applying, preserves the Airflow API signing key,
+creates a matching Redis-password/broker-secret pair, uses `CeleryExecutor`, caps the default
+pool to the executor capacity, and verifies the live executor after rollout. Do not replace it
+with an unversioned `helm upgrade`.
 
 Airflow 3 uses `airflow-api-server` and `airflow-dag-processor`; do not look for an Airflow 2
 webserver deployment.
@@ -332,6 +332,7 @@ subjects:
   - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-api-server, namespace: ${NAMESPACE}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -367,14 +368,14 @@ Do not apply or wait for `demo-psp-model-merge-job`; current DataSurface does no
 Wait for git-sync and DAG parsing, then:
 
 ```bash
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```
@@ -389,15 +390,16 @@ kubectl get pods -n "$NAMESPACE" -o wide
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
 ```
 
 Expected invariants:
 
 - Airflow reports `3.3.x`;
+- Airflow reports `CeleryExecutor`, one Ready worker, and a default pool of four slots;
 - no DAG import errors;
 - `demo-psp_infrastructure` most recent run succeeded;
 - the ring 1 Job completed;

@@ -147,13 +147,13 @@ Workspace(
    `demo-psp_infrastructure`. Its model-merge and factory-creation tasks refresh the dynamic DAG
    set. Discover the DT's DAG name rather than assuming a fixed factory DAG ID:
    ```bash
-   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+   kubectl exec -n demo1 deployment/airflow-scheduler -c scheduler -- \
      airflow dags trigger demo-psp_infrastructure
-   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+   kubectl exec -n demo1 deployment/airflow-scheduler -c scheduler -- \
      env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
-   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+   kubectl exec -n demo1 deployment/airflow-scheduler -c scheduler -- \
      airflow dags unpause <dt-dag-name>
-   kubectl exec -n demo1 airflow-scheduler-0 -c scheduler -- \
+   kubectl exec -n demo1 deployment/airflow-scheduler -c scheduler -- \
      airflow dags trigger <dt-dag-name>
    ```
 4. **Verify the DT ran and the output landed.** The DT's own raw write schema is `ds_dt_<workspace>_<datatransformer>` (all lowercased), e.g. `ds_dt_maskedstoregenerator_maskedcustomergenerator.dt_maskedcustomers_customers`. The ingested/consumer-visible copy follows demo1's normal SCD4 layout in `ds_dp_scd4`:

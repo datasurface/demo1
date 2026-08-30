@@ -7,7 +7,7 @@ description: Set up demo1 on Azure AKS with PostgreSQL Flexible Server, Azure SQ
 
 The starter path uses:
 
-- DataSurface `1.8.4`;
+- DataSurface `1.15.4`;
 - Airflow `3.3.0` with the supported merge-database drivers;
 - AKS, PostgreSQL Flexible Server for Airflow metadata, and Azure SQL for the merge database;
 - Azure Files NFS for both RWX cache claims and log storage;
@@ -43,7 +43,8 @@ PG_SERVER_NAME=<globally-unique-pg-name>
 PG_ADMIN_USER=<pg-admin>
 SQL_SERVER_NAME=<globally-unique-sql-name>
 SQL_ADMIN_USER=<sql-admin>
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.8.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
 GITHUB_USERNAME=<github-user>
@@ -57,7 +58,7 @@ az provider register --namespace Microsoft.Network
 Also require `PG_ADMIN_PASSWORD`, `SQL_ADMIN_PASSWORD`, `AIRFLOW_ADMIN_PASSWORD`, `GITHUB_TOKEN`,
 `GITLAB_CUSTOMER_USER`, and `GITLAB_CUSTOMER_TOKEN` in the environment. Azure-compatible strong
 passwords may contain special characters when variables are quoted correctly; do not weaken them
-to work around shell quoting. Require `python3` on the operator machine for safe encoding.
+to work around shell quoting. Require `python3`, `jq`, and `openssl` on the operator machine.
 
 Keep AKS, VNet, PostgreSQL, Azure SQL, and private endpoints in the same region. If a subscription
 blocks a SKU/region, choose an allowed region before provisioning rather than building a
@@ -273,7 +274,7 @@ Update:
 
 - `eco.py` to import `createDemoRTE` from `rte_azure` and use `MODEL_REPO`;
 - `rte_azure.py` placeholders for namespace, SQL FQDN, and PostgreSQL FQDN;
-- DataSurface image tag to `v1.8.4`;
+- DataSurface image tag to `v1.15.4`;
 - keep `externalSecretProvider=None`.
 
 Create a non-committed values file:
@@ -463,16 +464,27 @@ git -C "$DAG_CLONE" push origin main
 ## 9. Install Airflow 3.3 and secret-read RBAC
 
 ```bash
-helm repo add apache-airflow https://airflow.apache.org
-helm repo update apache-airflow
-helm upgrade --install airflow apache-airflow/airflow \
-  --namespace "$NAMESPACE" \
-  --values /tmp/airflow-values-azure.yaml \
-  --set images.airflow.tag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --set defaultAirflowTag=3.3.0-azure-supported-merge-drivers-20260714 \
-  --reset-values --timeout 20m --wait
+AIRFLOW_WORKER_REPLICAS=${AIRFLOW_WORKER_REPLICAS:-$(
+  kubectl get nodes -o json | jq '
+    [.items[]
+      | select(.spec.unschedulable != true)
+      | select(([.spec.taints[]?
+          | select(.effect == "NoSchedule" or .effect == "NoExecute")] | length) == 0)]
+    | length'
+)}
+test "$AIRFLOW_WORKER_REPLICAS" -ge 1
+
+export AIRFLOW_VALUES=/tmp/airflow-values-azure.yaml
+export NAMESPACE AIRFLOW_CHART_VERSION AIRFLOW_WORKER_REPLICAS
+export AIRFLOW_WORKER_CONCURRENCY=4
+helm/apply-airflow.sh
 rm -f /tmp/airflow-values-azure.yaml
 ```
+
+The default worker count is the number of schedulable, untainted nodes that the values can
+actually target. For a dedicated node pool, add its selector/tolerations to the values and set
+`AIRFLOW_WORKER_REPLICAS` explicitly. The topology-spread rule distributes those workers across
+eligible hosts without encoding customer node names or counts in generated DataSurface DAGs.
 
 Grant read-only access to namespace-local Secrets:
 
@@ -498,6 +510,7 @@ subjects:
   - {kind: ServiceAccount, name: airflow-worker, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-scheduler, namespace: ${NAMESPACE}}
   - {kind: ServiceAccount, name: airflow-triggerer, namespace: ${NAMESPACE}}
+  - {kind: ServiceAccount, name: airflow-api-server, namespace: ${NAMESPACE}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -526,12 +539,12 @@ kubectl apply -f generated_output/Demo_PSP/demo_psp_ring1_init_job.yaml
 kubectl wait --for=condition=complete \
   job/demo-psp-ring1-init -n "$NAMESPACE" --timeout=300s
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   airflow dags trigger demo-psp_infrastructure
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```
@@ -545,14 +558,15 @@ Wait for the new infrastructure run to reach `success`. Do not apply a
 kubectl get pods -n "$NAMESPACE" -o wide
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow version
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR airflow dags list --output json
 ```
 
-Verify Airflow `3.3.x`, no import errors, successful ring 1 and infrastructure runs, Ready MCP and
-Airflow pods, stable restarts, private database DNS/connectivity, and no unresolved warning events.
+Verify Airflow `3.3.x` with `CeleryExecutor`, one Ready worker on each expected eligible node, no
+import errors, successful ring 1 and infrastructure runs, Ready MCP and Airflow pods, stable
+restarts, private database DNS/connectivity, and no unresolved warning events.
 Require both cache claims to be Bound with `ReadWriteMany` and `azurefile-csi-nfs`; do not continue
 when only the Git-checkout claim is available. Discover generated SCD4 DAG IDs from Airflow; do
 not rely on a historical fixed list.

@@ -32,7 +32,7 @@ Search first:
 
 ```bash
 rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
-  requirements.txt rte_*.py .github .gitlab-ci.yml
+  requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 
 Update:
@@ -41,6 +41,7 @@ Update:
 - `datasurfaceDockerImage` in every deployed `rte_*.py`;
 - `.github/workflows/pull-request.yml`;
 - `.gitlab-ci.yml`, when GitLab CI is used.
+- README and skill examples that intentionally pin the current starter version.
 
 Do not change the Airflow image merely because the DataSurface version changed. Airflow has its
 own tested tag and should move only when the release requires it.
@@ -49,7 +50,7 @@ Confirm the pins agree:
 
 ```bash
 rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
-  requirements.txt rte_*.py .github .gitlab-ci.yml
+  requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 
 ## 3. Validate before publishing
@@ -62,7 +63,9 @@ git diff --check
 ```
 
 The `.venv` created from the pinned `requirements.txt` runs `test_loads` under `unittest`
-(no extra test dependencies required). Fix model construction or lint errors before pushing.
+(no extra test dependencies required). The test covers the local, AWS, and Azure RTE factories
+with valid customer-shaped placeholder values. Fix model construction or lint errors before
+pushing.
 
 Render each RTE that is actually deployed with the target image:
 
@@ -134,10 +137,10 @@ kubectl get jobs -n "$NAMESPACE"
 kubectl get events -n "$NAMESPACE" \
   --field-selector type=Warning --sort-by=.lastTimestamp
 
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-import-errors --output json
-kubectl exec -n "$NAMESPACE" airflow-scheduler-0 -c scheduler -- \
+kubectl exec -n "$NAMESPACE" deployment/airflow-scheduler -c scheduler -- \
   env AIRFLOW__LOGGING__LOGGING_LEVEL=ERROR \
   airflow dags list-runs demo-psp_infrastructure --output json
 ```

@@ -1,8 +1,11 @@
 # Airflow Helm Values for AWS EKS
-# Used with: helm install airflow apache-airflow/airflow -f helm/airflow-values-aws.yaml
+# Render placeholders, then apply with helm/apply-airflow.sh.
 # Environment-specific values are replaced by setup-walkthrough-aws during deployment.
 
 executor: CeleryExecutor
+enableServiceLinks: false
+
+apiSecretKeySecretName: airflow-api-secret-key-external
 
 # Standard Apache Airflow image
 images:
@@ -20,17 +23,29 @@ postgresql:
 
 data:
   metadataSecretName: airflow-metadata
+  brokerUrlSecretName: airflow-broker-url
 
 # Redis for Celery broker
 redis:
   enabled: true
+  passwordSecretName: airflow-redis-password
   persistence:
     enabled: true
     storageClassName: efs-sc
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Scheduler
 scheduler:
   replicas: 1
+  serviceAccount:
+    create: true
+    name: airflow-scheduler
   resources:
     requests:
       cpu: 500m
@@ -43,34 +58,84 @@ scheduler:
 
 # Workers
 workers:
-  replicas: 1
-  persistence:
-    enabled: true
-    storageClassName: efs-sc
-  resources:
-    requests:
-      cpu: 500m
-      memory: 2Gi
-    limits:
-      cpu: 2000m
-      memory: 4Gi
-  logGroomerSidecar:
-    retentionDays: 2
+  celery:
+    # helm/apply-airflow.sh overrides this with the discovered/approved count
+    # of nodes eligible for Airflow workers.
+    replicas: 1
+    serviceAccount:
+      create: true
+      name: airflow-worker
+    persistence:
+      enabled: true
+      storageClassName: efs-sc
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            component: worker
+    logGroomerSidecar:
+      retentionDays: 2
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
 
 # API server
 apiServer:
+  serviceAccount:
+    create: true
+    name: airflow-api-server
   service:
     type: ClusterIP
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
 
 # DAG processor
 dagProcessor:
   enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-dag-processor
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1
+      memory: 2Gi
   logGroomerSidecar:
     retentionDays: 2
 
 # Triggerer
 triggerer:
   enabled: true
+  serviceAccount:
+    create: true
+    name: airflow-triggerer
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
   logGroomerSidecar:
     retentionDays: 2
 
@@ -85,6 +150,7 @@ dags:
     subPath: dags
     wait: 60
     credentialsSecret: git-dags
+    recommendedProbeSetting: true
 
 # Logs
 logs:
@@ -95,28 +161,42 @@ logs:
 
 config:
   core:
-    parallelism: "128"
+    parallelism: "4"
+    max_active_tasks_per_dag: "4"
+    dagbag_import_timeout: "90"
+  dag_processor:
+    dag_file_processor_timeout: "120"
   celery:
-    worker_concurrency: "8"
+    worker_concurrency: "4"
   logging:
     delete_local_logs: "False"
   scheduler:
     dag_dir_list_interval: "60"
-    max_tis_per_query: "512"
-    max_dagruns_to_create_per_loop: "100"
-    max_dagruns_per_loop_to_schedule: "200"
+    max_tis_per_query: "4"
+    max_dagruns_to_create_per_loop: "16"
+    max_dagruns_per_loop_to_schedule: "32"
 
 # Cleanup CronJob - purges old metadata to prevent scheduler slowdown
 cleanup:
   enabled: true
   schedule: "*/30 * * * *"
   args: ["bash", "-c", "exec airflow db clean --clean-before-timestamp \"$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)\" --skip-archive -y -t celery_taskmeta -t dag_run -t task_instance -t task_instance_history -t job -t log && exec airflow kubernetes cleanup-pods --namespace={{ .Release.Namespace }}"]
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
-# Airflow job service account. Cloud-vault access belongs to External Secrets
-# Operator's dedicated service account, not to Airflow pods.
-serviceAccount:
-  create: true
-  name: airflow-worker
+statsd:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
 
 # PgBouncer connection pooler - transaction mode returns connections to the pool
 # after each transaction, preventing stale connection issues after DB restarts
@@ -126,8 +206,14 @@ pgbouncer:
   resultBackendPoolSize: 10
   maxClientConn: 200
   extraIni: |
-    pool_mode = transaction
     server_reset_query = DISCARD ALL
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Web UI credentials
 webserver:

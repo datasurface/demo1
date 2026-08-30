@@ -21,7 +21,7 @@ printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
 Then request the exact tested image:
 
 ```bash
-export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.8.4"
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4"
 docker pull --platform linux/amd64 "$IMAGE"
 docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
 ```
@@ -44,7 +44,7 @@ reserved characters.
 
 ```bash
 python -m pip index versions datasurface >/dev/null
-python -m pip install "datasurface==1.8.4"
+python -m pip install "datasurface==1.15.4"
 unset PIP_EXTRA_INDEX_URL
 ```
 
@@ -93,7 +93,7 @@ The checked-in workflows expect:
 - GitHub: `GITLAB_USERNAME`, `GITLAB_ACCESS_TOKEN`;
 - GitLab: `GITLAB_USERNAME`, `GITLAB_ACCESS_TOKEN` plus the repository token used by that runner.
 
-They run the `v1.8.4` validator with:
+They run the `v1.15.4` validator with:
 
 ```text
 python -m datasurface.entrypoints.action
