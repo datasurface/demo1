@@ -148,6 +148,14 @@ Configure these as **CI/CD variables** (Settings → CI/CD → Variables):
 
 Your GitLab deploy token credentials are the same ones described in [ARTIFACTS.md](ARTIFACTS.md) (Option A). Without these secrets (or equivalent credentials for your own registry), the Docker image pull will fail and PR/MR validation will not run.
 
+> **Set these in your own fork or clone.** This template repository intentionally contains no secrets,
+> so the `DataSurface PR Validator` check (and the GitLab CI equivalent) failing on the template
+> repository itself is expected. After you fork or clone it, add the secrets or variables above in
+> your copy: the GitHub secrets `GITLAB_USERNAME` and `GITLAB_ACCESS_TOKEN`, or the GitLab CI/CD
+> variables listed above. If you build your own image (Option B in [ARTIFACTS.md](ARTIFACTS.md)),
+> point the workflow at your image and use your own registry's credentials in those same settings
+> instead.
+
 ## DataSurface Artifacts
 
 See [ARTIFACTS.md](ARTIFACTS.md) for accessing DataSurface Docker images and Python modules.
