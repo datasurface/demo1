@@ -1,8 +1,10 @@
 # Copyright (c) 2026 DataSurface Inc. All Rights Reserved.
 # Proprietary Software - See LICENSE.txt for terms.
 
+import re
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import patch
 
@@ -14,6 +16,14 @@ import eco
 import rte_aws
 import rte_azure
 import rte_demo
+
+
+def pinnedDataSurfaceVersion() -> str:
+    """The DataSurface version pinned in requirements.txt (the single source of truth for the starter)."""
+    text: str = (Path(__file__).parent / "requirements.txt").read_text()
+    match = re.search(r"^datasurface(?:\[[^\]]*\])?==([^\s#]+)", text, re.MULTILINE)
+    assert match is not None, "requirements.txt must pin datasurface==<version>"
+    return match.group(1)
 
 
 class TestEcosystem(unittest.TestCase):
@@ -67,6 +77,7 @@ class TestEcosystem(unittest.TestCase):
         self.assertIsNone(scd4_root)
 
     def test_all_starter_rte_variants_lint_with_customer_values(self):
+        pinned_version: str = pinnedDataSurfaceVersion()
         variants = (
             ("local", rte_demo.createDemoRTE, {}),
             (
@@ -107,10 +118,11 @@ class TestEcosystem(unittest.TestCase):
                     lint_tree.printTree()
                 self.assertFalse(lint_tree.hasErrors())
 
+                self.assertEqual(module.DATASURFACE_VERSION, pinned_version)
                 psp = module.createDemoPSP()
                 self.assertEqual(
                     psp.datasurfaceDockerImage,
-                    "registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4",
+                    f"registry.gitlab.com/datasurface-inc/datasurface/datasurface:v{pinned_version}",
                 )
 
 

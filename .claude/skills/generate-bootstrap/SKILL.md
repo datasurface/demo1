@@ -14,7 +14,7 @@ environment. Current images expose the bootstrap CLI at
 Confirm these values before running commands:
 
 ```bash
-export DATASURFACE_VERSION="1.15.4"
+export DATASURFACE_VERSION="1.40.6"
 export MODEL_DIR="$(pwd)"
 export PSP_NAME="Demo_PSP"
 export RTE_NAME="demo"       # demo1 keeps this RTE name for local, AWS, and Azure

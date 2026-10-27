@@ -27,7 +27,9 @@ MERGE_DBNAME: str = "merge_db"
 AIRFLOW_HOST: str = "PLACEHOLDER_PG_FQDN"
 AIRFLOW_PORT: int = 5432
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
-DATASURFACE_VERSION: str = "1.15.4"
+# Image: default is the pre-built DataSurface image (registry.gitlab.com). To use your own image built with
+# datasurface_image_builder, replace the datasurfaceDockerImage value below (see ARTIFACTS.md).
+DATASURFACE_VERSION: str = "1.40.6"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:

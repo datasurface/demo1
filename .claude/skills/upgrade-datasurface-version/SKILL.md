@@ -24,21 +24,23 @@ docker pull --platform linux/amd64 "$IMAGE"
 docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
 ```
 
-Do not update the repository until the exact tag can be pulled.
+Do not update the repository until the exact tag can be pulled. If you run your own image
+(built with `datasurface_image_builder` and pushed to your registry), build and push the new tag first,
+then use your own `IMAGE` and registry login above instead of `registry.gitlab.com`.
 
 ## 2. Move all repository pins together
 
 Search first:
 
 ```bash
-rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+rg -n 'datasurface==|DATASURFACE_VERSION|datasurfaceDockerImage|datasurface/datasurface:v' \
   requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 
 Update:
 
 - `requirements.txt`;
-- `datasurfaceDockerImage` in every deployed `rte_*.py`;
+- `DATASURFACE_VERSION` (which feeds `datasurfaceDockerImage`) in every deployed `rte_*.py`;
 - `.github/workflows/pull-request.yml`;
 - `.gitlab-ci.yml`, when GitLab CI is used.
 - README and skill examples that intentionally pin the current starter version.
@@ -49,7 +51,7 @@ own tested tag and should move only when the release requires it.
 Confirm the pins agree:
 
 ```bash
-rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+rg -n 'datasurface==|DATASURFACE_VERSION|datasurfaceDockerImage|datasurface/datasurface:v' \
   requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 

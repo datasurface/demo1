@@ -10,6 +10,11 @@ traces. Diagnose the failing layer independently.
 
 ## Container registry
 
+This section covers the pre-built image on `registry.gitlab.com` (deploy token). If you build your own
+image with `datasurface_image_builder`, authenticate to your own registry instead and apply the same
+checks (`denied`/`401` = credential, `manifest unknown` = wrong path or tag); a failing *build* is a
+package-token problem, see the Python package section.
+
 Authenticate safely:
 
 ```bash
@@ -21,7 +26,7 @@ printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
 Then request the exact tested image:
 
 ```bash
-export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4"
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6"
 docker pull --platform linux/amd64 "$IMAGE"
 docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
 ```
@@ -44,7 +49,7 @@ reserved characters.
 
 ```bash
 python -m pip index versions datasurface >/dev/null
-python -m pip install "datasurface==1.15.4"
+python -m pip install "datasurface==1.40.6"
 unset PIP_EXTRA_INDEX_URL
 ```
 
@@ -93,7 +98,7 @@ The checked-in workflows expect:
 - GitHub: `GITLAB_USERNAME`, `GITLAB_ACCESS_TOKEN`;
 - GitLab: `GITLAB_USERNAME`, `GITLAB_ACCESS_TOKEN` plus the repository token used by that runner.
 
-They run the `v1.15.4` validator with:
+They run the `v1.40.6` validator with:
 
 ```text
 python -m datasurface.entrypoints.action

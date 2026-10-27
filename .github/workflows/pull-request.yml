@@ -15,7 +15,7 @@ jobs:
 
     steps:
     - name: Checkout PR code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         # Must specify repository for fork-based PRs when using pull_request_target
         # Without this, checkout looks for the SHA in the base repo where it doesn't exist
@@ -25,14 +25,15 @@ jobs:
         persist-credentials: false
 
     - name: Checkout main branch code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
-        ref: 'main'
+        # Pin to the PR's base commit, not the moving 'main' ref.
+        ref: ${{ github.event.pull_request.base.sha }}
         path: main
         persist-credentials: false
 
     - name: Login to GitLab Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: registry.gitlab.com
         username: ${{ secrets.GITLAB_USERNAME }}
@@ -40,19 +41,32 @@ jobs:
 
     - name: Check for breaking change approval
       id: check_label
+      env:
+        HAS_BREAKING_CHANGE_APPROVAL: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}
       run: |
-        if [[ "${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}" == "true" ]]; then
-          echo "ALLOW_BREAKS=--allow-breaking-changes" >> $GITHUB_OUTPUT
+        if [[ "$HAS_BREAKING_CHANGE_APPROVAL" == "true" ]]; then
+          echo "ALLOW_BREAKS=--allow-breaking-changes" >> "$GITHUB_OUTPUT"
         else
-          echo "ALLOW_BREAKS=" >> $GITHUB_OUTPUT
+          echo "ALLOW_BREAKS=" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Run check script in Docker container
+      # PR-controlled values (branch name, repository) go through env, never inline in the script,
+      # so they cannot inject shell commands into a job that holds registry credentials.
+      env:
+        WORKSPACE: ${{ github.workspace }}
+        HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        ALLOW_BREAKS: ${{ steps.check_label.outputs.ALLOW_BREAKS }}
       run: |
+        extra_args=()
+        if [[ -n "$ALLOW_BREAKS" ]]; then
+          extra_args+=("$ALLOW_BREAKS")
+        fi
         docker run --rm \
-          -v ${{ github.workspace }}/main:/workspace/main \
-          -v ${{ github.workspace }}/pr:/workspace/pr \
-          -e HEAD_REPOSITORY="${{ github.event.pull_request.head.repo.full_name }}" \
-          -e HEAD_BRANCH="${{ github.event.pull_request.head.ref }}" \
-          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4 \
-          python -m datasurface.entrypoints.action /workspace/main /workspace/pr ${{ steps.check_label.outputs.ALLOW_BREAKS }}
+          -v "$WORKSPACE/main:/workspace/main" \
+          -v "$WORKSPACE/pr:/workspace/pr" \
+          -e HEAD_REPOSITORY="$HEAD_REPOSITORY" \
+          -e HEAD_BRANCH="$HEAD_BRANCH" \
+          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6 \
+          python -P -m datasurface.entrypoints.action /workspace/main /workspace/pr "${extra_args[@]}"

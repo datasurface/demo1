@@ -25,6 +25,10 @@ KUB_NAME_SPACE: str = "demo1"
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 MERGE_HOST: str = "host.docker.internal"  # Access Docker containers from K8s
 MERGE_DBNAME: str = "merge_db"
+# DataSurface release for the runtime image. Keep in step with requirements.txt (test_loads.py checks this).
+# Image: default is the pre-built DataSurface image (registry.gitlab.com). To use your own image built with
+# datasurface_image_builder, replace the datasurfaceDockerImage value below (see ARTIFACTS.md).
+DATASURFACE_VERSION: str = "1.40.6"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:
@@ -57,7 +61,7 @@ def createDemoPSP() -> YellowPlatformServiceProvider:
         yp_assembly=yp_assembly,
         merge_datacontainer=k8s_merge_datacontainer,
         pv_storage_class="standard",
-        datasurfaceDockerImage="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4",
+        datasurfaceDockerImage=f"registry.gitlab.com/datasurface-inc/datasurface/datasurface:v{DATASURFACE_VERSION}",
         dataPlatforms=[
             YellowDataPlatform(
                 "SCD4",

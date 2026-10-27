@@ -4,7 +4,10 @@ description: Configure a namespace to pull DataSurface images from the GitLab co
 ---
 # Setup Kubernetes Registry Secret
 
-Configure your Kubernetes cluster to pull DataSurface Docker images from the GitLab container registry.
+Configure your Kubernetes cluster to pull the DataSurface Docker image. By default that is the pre-built
+image from the GitLab container registry, `registry.gitlab.com` (Option A, below). If you build your own image
+(Option B), create the same Secret with your own registry's server and credentials instead of
+`registry.gitlab.com` and the deploy token, and use your image and tag in `rte_*.py`.
 
 ## Prerequisites
 
@@ -84,7 +87,7 @@ spec:
     - name: datasurface-registry
   containers:
     - name: datasurface
-      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4
+      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6
 ```
 
 ## Using in Helm Charts
@@ -97,7 +100,7 @@ imagePullSecrets:
 
 image:
   repository: registry.gitlab.com/datasurface-inc/datasurface/datasurface
-  tag: v1.15.4
+  tag: v1.40.6
 ```
 
 ## Updating the Secret

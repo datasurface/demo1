@@ -7,7 +7,7 @@ A template for bootstrapping a DataSurface Yellow environment with Kubernetes.
 - Docker Desktop with Kubernetes enabled (local) or access to a remote Kubernetes cluster
 - `kubectl` and `helm` CLI tools
 - GitHub Personal Access Token (for GitSync and model repository access)
-- GitLab credentials for DataSurface Docker images (see [ARTIFACTS.md](ARTIFACTS.md))
+- A DataSurface runtime image: either GitLab deploy-token credentials to pull the pre-built image (default), or your own image built with `datasurface_image_builder` (your own base image, or database drivers DataSurface cannot redistribute) and pushed to your registry (see [ARTIFACTS.md](ARTIFACTS.md))
 
 ## Environment Variables
 
@@ -17,9 +17,10 @@ Set these before starting:
 export NAMESPACE="demo1"
 export GITHUB_USERNAME="your-github-username"
 export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+# Pre-built image (default). Skip these two if you build your own image:
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.15.4"
+export DATASURFACE_VERSION="1.40.6"
 ```
 
 ## Setup
@@ -119,11 +120,11 @@ Kubernetes Secrets, and optional ESO integration, see the
 | `postgres-demo-merge` | `USER`, `PASSWORD` | DataSurface merge database |
 | `git` | `TOKEN` | Model repository access |
 | `git-dags` | `GITSYNC_USERNAME`, `GITSYNC_PASSWORD` | Airflow DAG sync |
-| `datasurface-registry` | Docker registry auth | Pull DataSurface images |
+| `datasurface-registry` | Docker registry auth | Pull the DataSurface image (the pre-built `registry.gitlab.com` image, or your own registry if you build your own) |
 
 ## CI/CD Validation Secrets
 
-This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. These workflows pull the DataSurface validator Docker image from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work.
+This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. By default these workflows pull the pre-built DataSurface validator image (pinned to `1.40.6`) from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work. If you build your own image, change the image reference in the workflow file and use credentials for your own registry instead.
 
 ### GitHub Actions — `.github/workflows/pull-request.yml`
 
@@ -145,7 +146,15 @@ Configure these as **CI/CD variables** (Settings → CI/CD → Variables):
 | `GITLAB_ACCESS_TOKEN` | GitLab deploy token value |
 | `GITLAB_CLONE_HOST` | Your GitLab hostname (defaults to `gitlab.local`) |
 
-Your GitLab deploy token credentials are the same ones described in [ARTIFACTS.md](ARTIFACTS.md). Without these secrets, the Docker image pull will fail and PR/MR validation will not run.
+Your GitLab deploy token credentials are the same ones described in [ARTIFACTS.md](ARTIFACTS.md) (Option A). Without these secrets (or equivalent credentials for your own registry), the Docker image pull will fail and PR/MR validation will not run.
+
+> **Set these in your own fork or clone.** This template repository intentionally contains no secrets,
+> so the `DataSurface PR Validator` check (and the GitLab CI equivalent) failing on the template
+> repository itself is expected. After you fork or clone it, add the secrets or variables above in
+> your copy: the GitHub secrets `GITLAB_USERNAME` and `GITLAB_ACCESS_TOKEN`, or the GitLab CI/CD
+> variables listed above. If you build your own image (Option B in [ARTIFACTS.md](ARTIFACTS.md)),
+> point the workflow at your image and use your own registry's credentials in those same settings
+> instead.
 
 ## DataSurface Artifacts
 

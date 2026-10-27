@@ -7,7 +7,7 @@ description: Set up the demo1 DataSurface Yellow SCD4 environment on Docker Desk
 
 This is the current Docker Desktop path for the `demo1` model. It uses:
 
-- DataSurface `1.15.4`;
+- DataSurface `1.40.6`;
 - Airflow `3.3.0`;
 - SCD4 platform `Demo_PSP`;
 - Docker Compose PostgreSQL for Airflow metadata and the merge database;
@@ -31,7 +31,7 @@ the split plan → publish flow (and plan → ESO reconcile → publish on cloud
 
 ```bash
 NAMESPACE=${NAMESPACE:-demo1}
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.40.6}
 AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
@@ -49,7 +49,9 @@ Require:
 - Docker Desktop Kubernetes;
 - `kubectl`, `helm`, `git`, `jq`, `python3`, and `openssl`;
 - a GitHub token with read/write access to the model and DAG repositories;
-- GitLab registry credentials that can pull DataSurface images.
+- either GitLab registry (`registry.gitlab.com`) credentials that can pull the pre-built DataSurface image
+  (default), or your own image built with `datasurface_image_builder` (your own base image, or database
+  drivers DataSurface cannot redistribute) and pushed to your registry (see `ARTIFACTS.md`).
 
 Set `POSTGRES_PASSWORD` to the password used by `docker/postgres/docker-compose.yml` (the checked-in
 local default is `password`). Do not echo it.
@@ -120,13 +122,13 @@ Update:
 The checked-in baseline is:
 
 ```python
-DATASURFACE_VERSION = "1.15.4"
+DATASURFACE_VERSION = "1.40.6"
 ```
 
 and:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.15.4
+registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6
 ```
 
 Validate before publishing:

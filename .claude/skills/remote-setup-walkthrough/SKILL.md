@@ -39,7 +39,7 @@ export MERGE_DB_HOST="<merge-postgres-host>"
 export PG_USER="<postgres-user>"
 export MODEL_REPO="<owner/model-repo>"
 export AIRFLOW_REPO="<owner/airflow-repo>"
-export DATASURFACE_VERSION="${DATASURFACE_VERSION:-1.15.4}"
+export DATASURFACE_VERSION="${DATASURFACE_VERSION:-1.40.6}"
 export AIRFLOW_CHART_VERSION="${AIRFLOW_CHART_VERSION:-1.22.0}"
 
 export SSH_CMD="ssh -i $SSH_KEY $SSH_USER@$SSH_HOST"
@@ -103,8 +103,8 @@ Update:
 - `eco.py`: Git owner and repository;
 - `rte_demo.py`: namespace, merge host, and `MERGE_DBNAME` (set it to the merge database
   created in Step 1, e.g. `demo_merge`; the starter default is `merge_db`), `ReadWriteMany`
-  Git cache, selected storage class, and DataSurface image `v1.15.4`;
-- `requirements.txt`: `datasurface==1.15.4`.
+  Git cache, selected storage class, and DataSurface image `v1.40.6`;
+- `requirements.txt`: `datasurface==1.40.6`.
 
 Both cache claims must remain shared. They are controlled by one `GitCacheConfig`:
 
@@ -159,7 +159,7 @@ Use:
 python -m datasurface.entrypoints.platform generatePlatformBootstrap
 ```
 
-inside the `v1.15.4` image. Require these four artifacts:
+inside the `v1.40.6` image. Require these four artifacts:
 
 ```text
 kubernetes-bootstrap.yaml

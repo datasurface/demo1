@@ -7,7 +7,7 @@ description: Set up demo1 on Azure AKS with PostgreSQL Flexible Server, Azure SQ
 
 The starter path uses:
 
-- DataSurface `1.15.4`;
+- DataSurface `1.40.6`;
 - Airflow `3.3.0` with the supported merge-database drivers;
 - AKS, PostgreSQL Flexible Server for Airflow metadata, and Azure SQL for the merge database;
 - Azure Files NFS for both RWX cache claims and log storage;
@@ -43,7 +43,7 @@ PG_SERVER_NAME=<globally-unique-pg-name>
 PG_ADMIN_USER=<pg-admin>
 SQL_SERVER_NAME=<globally-unique-sql-name>
 SQL_ADMIN_USER=<sql-admin>
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.40.6}
 AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
@@ -274,7 +274,7 @@ Update:
 
 - `eco.py` to import `createDemoRTE` from `rte_azure` and use `MODEL_REPO`;
 - `rte_azure.py` placeholders for namespace, SQL FQDN, and PostgreSQL FQDN;
-- DataSurface image tag to `v1.15.4`;
+- DataSurface image tag to `v1.40.6`;
 - keep `externalSecretProvider=None`.
 
 Create a non-committed values file:

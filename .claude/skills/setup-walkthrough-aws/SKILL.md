@@ -7,7 +7,7 @@ description: Set up demo1 on AWS EKS with RDS PostgreSQL, EFS, Airflow 3.3, admi
 
 The starter path uses:
 
-- DataSurface `1.15.4`;
+- DataSurface `1.40.6`;
 - Airflow `3.3.0`;
 - EKS, RDS PostgreSQL, and EFS for both shared cache claims;
 - SCD4 platform `Demo_PSP`;
@@ -36,7 +36,7 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 STACK_NAME=<short-stack-name>
 KEY_PAIR_NAME=<ec2-key-pair>
 NAMESPACE=${NAMESPACE:-demo1-aws}
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.15.4}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.40.6}
 AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
@@ -213,7 +213,7 @@ Update:
 
 - `eco.py` to import `createDemoRTE` from `rte_aws` and use `MODEL_REPO`;
 - `rte_aws.py` placeholders for namespace, RDS PostgreSQL endpoint, and AWS account;
-- DataSurface image tag to `v1.15.4`;
+- DataSurface image tag to `v1.40.6`;
 - keep `externalSecretProvider=None`.
 
 Create a non-committed values file:
