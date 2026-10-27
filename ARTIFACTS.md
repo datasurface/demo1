@@ -12,8 +12,8 @@ the final image reference.
 ### Option A: pre-built DataSurface image (this starter's default)
 
 Use the image DataSurface builds and validates for each release (the "release image"). It is
-pulled from the DataSurface GitLab container registry with a read-only deploy token that
-DataSurface gives you.
+pulled from the DataSurface GitLab container registry, `registry.gitlab.com` (not Docker Hub),
+with a read-only deploy token that DataSurface gives you.
 
 - **Username**: your deploy token username (e.g., `customer-acme`)
 - **Token**: your deploy token value
@@ -36,10 +36,13 @@ docker pull --platform linux/amd64 \
 
 Build the image yourself from the versioned `datasurface` PyPI/Maven packages with the public
 [`datasurface_image_builder`](https://github.com/datasurface/datasurface_image_builder), on your
-own approved base image, and push it to your own container registry. Use this when policy
-requires images to derive from an approved corporate base, or to keep image pulls inside your own
-registry. DataSurface's documentation describes its published images as build-validation
-artifacts, not a required customer dependency, so building your own is a supported path.
+own base image, and push it to your own container registry. Customers build their own image when:
+
+1. they want to use their own base image (for example, one their organization has approved); or
+2. they need database drivers that DataSurface cannot redistribute, which they add to their own image.
+
+DataSurface's documentation describes its published images as build-validation artifacts, not a
+required customer dependency, so building your own is a supported path.
 
 ```bash
 git clone https://github.com/datasurface/datasurface_image_builder.git

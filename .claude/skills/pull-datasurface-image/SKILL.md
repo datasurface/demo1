@@ -7,9 +7,9 @@ description: Authenticate to the GitLab container registry and pull a pinned Dat
 Get the DataSurface runtime image onto your local machine. There are two sources:
 
 - **Option A (default): pre-built image.** Pull the DataSurface release image from the GitLab
-  container registry with your deploy token (the rest of this skill).
-- **Option B: build your own.** Build with `datasurface_image_builder` on your approved base image
-  and push to your own registry; skip the login/pull below. See "Option B" at the end.
+  container registry (`registry.gitlab.com`, not Docker Hub) with your deploy token (the rest of this skill).
+- **Option B: build your own.** Build with `datasurface_image_builder` when you want your own base
+  image or need database drivers DataSurface cannot redistribute, and push to your own registry; skip the login/pull below. See "Option B" at the end.
 
 ## Prerequisites
 
@@ -122,8 +122,8 @@ docker pull --platform linux/amd64 registry.gitlab.com/datasurface-inc/datasurfa
 
 ## Option B: build your own image
 
-Use this instead of the pull above when policy requires your own base image or registry. It needs
-only the read-only GitLab package token (no DataSurface registry access).
+Use this instead of the pull above if you want your own base image, or you need database drivers
+that DataSurface cannot redistribute in your image. It needs only the read-only GitLab package token (no DataSurface registry access).
 
 ```bash
 git clone https://github.com/datasurface/datasurface_image_builder.git

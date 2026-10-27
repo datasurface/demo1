@@ -7,7 +7,7 @@ A template for bootstrapping a DataSurface Yellow environment with Kubernetes.
 - Docker Desktop with Kubernetes enabled (local) or access to a remote Kubernetes cluster
 - `kubectl` and `helm` CLI tools
 - GitHub Personal Access Token (for GitSync and model repository access)
-- A DataSurface runtime image: either GitLab deploy-token credentials to pull the pre-built image (default), or your own image built with `datasurface_image_builder` and pushed to your registry (see [ARTIFACTS.md](ARTIFACTS.md))
+- A DataSurface runtime image: either GitLab deploy-token credentials to pull the pre-built image (default), or your own image built with `datasurface_image_builder` (your own base image, or database drivers DataSurface cannot redistribute) and pushed to your registry (see [ARTIFACTS.md](ARTIFACTS.md))
 
 ## Environment Variables
 
