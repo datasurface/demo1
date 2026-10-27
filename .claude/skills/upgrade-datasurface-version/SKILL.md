@@ -31,14 +31,14 @@ Do not update the repository until the exact tag can be pulled.
 Search first:
 
 ```bash
-rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+rg -n 'datasurface==|DATASURFACE_VERSION|datasurfaceDockerImage|datasurface/datasurface:v' \
   requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 
 Update:
 
 - `requirements.txt`;
-- `datasurfaceDockerImage` in every deployed `rte_*.py`;
+- `DATASURFACE_VERSION` (which feeds `datasurfaceDockerImage`) in every deployed `rte_*.py`;
 - `.github/workflows/pull-request.yml`;
 - `.gitlab-ci.yml`, when GitLab CI is used.
 - README and skill examples that intentionally pin the current starter version.
@@ -49,7 +49,7 @@ own tested tag and should move only when the release requires it.
 Confirm the pins agree:
 
 ```bash
-rg -n 'datasurface==|datasurfaceDockerImage|datasurface/datasurface:v' \
+rg -n 'datasurface==|DATASURFACE_VERSION|datasurfaceDockerImage|datasurface/datasurface:v' \
   requirements.txt rte_*.py .github .gitlab-ci.yml README.md .claude/skills
 ```
 

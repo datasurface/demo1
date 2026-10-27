@@ -19,7 +19,7 @@ export GITHUB_USERNAME="your-github-username"
 export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.15.4"
+export DATASURFACE_VERSION="1.40.6"
 ```
 
 ## Setup

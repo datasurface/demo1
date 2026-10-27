@@ -1,5 +1,8 @@
 # DataSurface Artifacts
 
+This starter is pinned to DataSurface **1.40.6** (`requirements.txt`; `DATASURFACE_VERSION` in `rte_*.py`).
+Set `DATASURFACE_VERSION=1.40.6` for the commands below.
+
 ## Credentials
 
 You will receive the following from DataSurface:

@@ -22,7 +22,7 @@ supports interval mode and either key-pair or SPCS file-token authentication.
 
 ```bash
 NAMESPACE=demo1
-DATASURFACE_VERSION=1.15.4
+DATASURFACE_VERSION=1.40.6
 DB_TYPE=postgres                 # postgres, sqlserver, or snowflake
 DB_HOST=host.docker.internal
 DB_PORT=5432
