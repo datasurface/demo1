@@ -10,6 +10,11 @@ traces. Diagnose the failing layer independently.
 
 ## Container registry
 
+This section covers the pre-built image on `registry.gitlab.com` (deploy token). If you build your own
+image with `datasurface_image_builder`, authenticate to your own registry instead and apply the same
+checks (`denied`/`401` = credential, `manifest unknown` = wrong path or tag); a failing *build* is a
+package-token problem, see the Python package section.
+
 Authenticate safely:
 
 ```bash

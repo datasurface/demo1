@@ -49,7 +49,8 @@ Require:
 - Docker Desktop Kubernetes;
 - `kubectl`, `helm`, `git`, `jq`, `python3`, and `openssl`;
 - a GitHub token with read/write access to the model and DAG repositories;
-- GitLab registry credentials that can pull DataSurface images.
+- either GitLab registry credentials that can pull the pre-built DataSurface image (default), or your own
+  image built with `datasurface_image_builder` and pushed to your registry (see `ARTIFACTS.md`).
 
 Set `POSTGRES_PASSWORD` to the password used by `docker/postgres/docker-compose.yml` (the checked-in
 local default is `password`). Do not echo it.

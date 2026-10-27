@@ -24,7 +24,9 @@ docker pull --platform linux/amd64 "$IMAGE"
 docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}'
 ```
 
-Do not update the repository until the exact tag can be pulled.
+Do not update the repository until the exact tag can be pulled. If you run your own image
+(built with `datasurface_image_builder` and pushed to your registry), build and push the new tag first,
+then use your own `IMAGE` and registry login above instead of `registry.gitlab.com`.
 
 ## 2. Move all repository pins together
 

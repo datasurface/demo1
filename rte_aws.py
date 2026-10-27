@@ -26,6 +26,8 @@ MERGE_DBNAME: str = "merge_db"
 AIRFLOW_HOST: str = "PLACEHOLDER_POSTGRES_ENDPOINT"
 AIRFLOW_PORT: int = 5432
 AWS_ACCOUNT_ID: str = "PLACEHOLDER_AWS_ACCOUNT_ID"
+# Image: default is the pre-built DataSurface image (registry.gitlab.com). To use your own image built with
+# datasurface_image_builder, replace the datasurfaceDockerImage value below (see ARTIFACTS.md).
 DATASURFACE_VERSION: str = "1.40.6"
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 

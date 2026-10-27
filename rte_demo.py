@@ -26,6 +26,8 @@ AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 MERGE_HOST: str = "host.docker.internal"  # Access Docker containers from K8s
 MERGE_DBNAME: str = "merge_db"
 # DataSurface release for the runtime image. Keep in step with requirements.txt (test_loads.py checks this).
+# Image: default is the pre-built DataSurface image (registry.gitlab.com). To use your own image built with
+# datasurface_image_builder, replace the datasurfaceDockerImage value below (see ARTIFACTS.md).
 DATASURFACE_VERSION: str = "1.40.6"
 
 
