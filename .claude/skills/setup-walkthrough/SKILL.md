@@ -7,7 +7,7 @@ description: Set up the demo1 DataSurface Yellow SCD4 environment on Docker Desk
 
 This is the current Docker Desktop path for the `demo1` model. It uses:
 
-- DataSurface `1.40.6`;
+- DataSurface `1.51.3`;
 - Airflow `3.3.0`;
 - SCD4 platform `Demo_PSP`;
 - Docker Compose PostgreSQL for Airflow metadata and the merge database;
@@ -31,7 +31,7 @@ the split plan → publish flow (and plan → ESO reconcile → publish on cloud
 
 ```bash
 NAMESPACE=${NAMESPACE:-demo1}
-DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.40.6}
+DATASURFACE_VERSION=${DATASURFACE_VERSION:-1.51.3}
 AIRFLOW_CHART_VERSION=${AIRFLOW_CHART_VERSION:-1.22.0}
 MODEL_REPO=<owner/model-repo>
 AIRFLOW_REPO=<owner/dag-repo>
@@ -122,13 +122,13 @@ Update:
 The checked-in baseline is:
 
 ```python
-DATASURFACE_VERSION = "1.40.6"
+DATASURFACE_VERSION = "1.51.3"
 ```
 
 and:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6
+registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.51.3
 ```
 
 Validate before publishing:

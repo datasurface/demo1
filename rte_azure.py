@@ -29,7 +29,7 @@ AIRFLOW_PORT: int = 5432
 AIRFLOW_SERVICE_ACCOUNT: str = "airflow-worker"
 # Image: default is the pre-built DataSurface image (registry.gitlab.com). To use your own image built with
 # datasurface_image_builder, replace the datasurfaceDockerImage value below (see ARTIFACTS.md).
-DATASURFACE_VERSION: str = "1.40.6"
+DATASURFACE_VERSION: str = "1.51.3"
 
 
 def createDemoPSP() -> YellowPlatformServiceProvider:

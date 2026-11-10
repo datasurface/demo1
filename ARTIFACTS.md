@@ -1,12 +1,12 @@
 # DataSurface Artifacts
 
-This starter is pinned to DataSurface **1.40.6** (`requirements.txt`; `DATASURFACE_VERSION` in `rte_*.py`).
-Set `DATASURFACE_VERSION=1.40.6` for the commands below.
+This starter is pinned to DataSurface **1.51.3** (`requirements.txt`; `DATASURFACE_VERSION` in `rte_*.py`).
+Set `DATASURFACE_VERSION=1.51.3` for the commands below.
 
 ## Container image: two options
 
 Jobs and Airflow pods need a DataSurface runtime image. You choose how to get it. The model
-(`rte_*.py` -> `datasurfaceDockerImage`, pinned to `1.40.6` here) and the CI validators only need
+(`rte_*.py` -> `datasurfaceDockerImage`, pinned to `1.51.3` here) and the CI validators only need
 the final image reference.
 
 ### Option A: pre-built DataSurface image (this starter's default)
@@ -48,7 +48,7 @@ required customer dependency, so building your own is a supported path.
 git clone https://github.com/datasurface/datasurface_image_builder.git
 cd datasurface_image_builder
 
-export DATASURFACE_VERSION="1.40.6"
+export DATASURFACE_VERSION="1.51.3"
 export BASE_IMAGE="registry.customer.example/approved/python-java:3.12-25"
 export GITLAB_PACKAGE_TOKEN="<read-only-package-token>"
 export IMAGE_NAME="registry.customer.example/data-platform/datasurface"
