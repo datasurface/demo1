@@ -32,7 +32,7 @@ You need GitLab registry credentials:
 ```bash
 export GITLAB_CUSTOMER_USER="your-deploy-token-username"
 export GITLAB_CUSTOMER_TOKEN="your-deploy-token"
-export DATASURFACE_VERSION="1.40.6"
+export DATASURFACE_VERSION="1.51.3"
 ```
 
 ### 2. Login to GitLab Registry
@@ -72,7 +72,7 @@ docker images | grep datasurface
 Expected output:
 
 ```text
-registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.40.6  abc123def456   2 days ago   1.2GB
+registry.gitlab.com/datasurface-inc/datasurface/datasurface   v1.51.3  abc123def456   2 days ago   1.2GB
 ```
 
 ## Quick One-Liner
@@ -108,7 +108,7 @@ Error response from daemon: manifest for ... not found
 
 ```bash
 # Use the repository's tested version
-export DATASURFACE_VERSION="1.40.6"
+export DATASURFACE_VERSION="1.51.3"
 ```
 
 ### Pulling Latest Version
@@ -128,7 +128,7 @@ that DataSurface cannot redistribute in your image. It needs only the read-only 
 ```bash
 git clone https://github.com/datasurface/datasurface_image_builder.git
 cd datasurface_image_builder
-export DATASURFACE_VERSION="1.40.6"
+export DATASURFACE_VERSION="1.51.3"
 export BASE_IMAGE="registry.customer.example/approved/python-java:3.12-25"
 export GITLAB_PACKAGE_TOKEN="<read-only-package-token>"   # never echo or commit
 export IMAGE_NAME="registry.customer.example/data-platform/datasurface"

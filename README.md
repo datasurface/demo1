@@ -20,7 +20,7 @@ export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 # Pre-built image (default). Skip these two if you build your own image:
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.40.6"
+export DATASURFACE_VERSION="1.51.3"
 ```
 
 ## Setup
@@ -124,7 +124,7 @@ Kubernetes Secrets, and optional ESO integration, see the
 
 ## CI/CD Validation Secrets
 
-This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. By default these workflows pull the pre-built DataSurface validator image (pinned to `1.40.6`) from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work. If you build your own image, change the image reference in the workflow file and use credentials for your own registry instead.
+This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. By default these workflows pull the pre-built DataSurface validator image (pinned to `1.51.3`) from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work. If you build your own image, change the image reference in the workflow file and use credentials for your own registry instead.
 
 ### GitHub Actions — `.github/workflows/pull-request.yml`
 

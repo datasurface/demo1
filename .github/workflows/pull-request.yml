@@ -68,5 +68,5 @@ jobs:
           -v "$WORKSPACE/pr:/workspace/pr" \
           -e HEAD_REPOSITORY="$HEAD_REPOSITORY" \
           -e HEAD_BRANCH="$HEAD_BRANCH" \
-          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.40.6 \
+          registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.51.3 \
           python -P -m datasurface.entrypoints.action /workspace/main /workspace/pr "${extra_args[@]}"
