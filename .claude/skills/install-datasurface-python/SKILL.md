@@ -26,7 +26,7 @@ unset PIP_EXTRA_INDEX_URL
 For this revision, `requirements.txt` pins:
 
 ```text
-datasurface==1.51.3
+datasurface==1.52.5
 ```
 
 Do not install an unpinned “latest” release while validating demo1; the package, runtime image,
@@ -44,7 +44,7 @@ DB2 support is AMD64-only:
 
 ```bash
 export PIP_EXTRA_INDEX_URL="<rebuild with configure-pip-datasurface>"
-python -m pip install "datasurface[db2]==1.51.3"
+python -m pip install "datasurface[db2]==1.52.5"
 unset PIP_EXTRA_INDEX_URL
 ```
 

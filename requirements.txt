@@ -1,1 +1,1 @@
-datasurface==1.51.3
+datasurface==1.52.5

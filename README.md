@@ -20,7 +20,7 @@ export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 # Pre-built image (default). Skip these two if you build your own image:
 export GITLAB_CUSTOMER_USER="gitlab+deploy-token-xxxxx"
 export GITLAB_CUSTOMER_TOKEN="your-gitlab-deploy-token"
-export DATASURFACE_VERSION="1.51.3"
+export DATASURFACE_VERSION="1.52.5"
 ```
 
 ## Setup
@@ -124,7 +124,7 @@ Kubernetes Secrets, and optional ESO integration, see the
 
 ## CI/CD Validation Secrets
 
-This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. By default these workflows pull the pre-built DataSurface validator image (pinned to `1.51.3`) from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work. If you build your own image, change the image reference in the workflow file and use credentials for your own registry instead.
+This repository includes CI/CD workflow files that automatically validate pull requests (GitHub) and merge requests (GitLab) against the DataSurface model. By default these workflows pull the pre-built DataSurface validator image (pinned to `1.52.5`) from the GitLab Container Registry and require authentication secrets to be configured **before** validation will work. If you build your own image, change the image reference in the workflow file and use credentials for your own registry instead.
 
 ### GitHub Actions — `.github/workflows/pull-request.yml`
 
@@ -145,6 +145,20 @@ Configure these as **CI/CD variables** (Settings → CI/CD → Variables):
 | `GITLAB_USERNAME` | GitLab deploy token username (for pulling the DataSurface image) |
 | `GITLAB_ACCESS_TOKEN` | GitLab deploy token value |
 | `GITLAB_CLONE_HOST` | Your GitLab hostname (defaults to `gitlab.local`) |
+| `GITLAB_API_TOKEN` | Token with the `read_api` scope on the model project; reads the merge request's approvals when it has the `breaking-change-approved` label |
+
+### Breaking changes
+
+The validator refuses a change that breaks existing consumers. To allow one, add the label
+`breaking-change-approved` **and** have someone other than the author approve the pull or merge
+request. The label alone fails the check. On GitHub, the approval must be on the latest commit; after
+approving, re-run the check. On GitLab, approve and then run a new pipeline.
+
+Mark `GITLAB_API_TOKEN` and the other tokens **Masked**. The GitLab job runs the `.gitlab-ci.yml` from
+the merge request's own branch, so an author can edit the check itself. To stop that, run the check
+from a protected location: set the project's CI/CD configuration file to a file in a protected
+project, or use a pipeline execution policy. The GitHub workflow uses `pull_request_target`, so it
+always runs the version on the base branch.
 
 Your GitLab deploy token credentials are the same ones described in [ARTIFACTS.md](ARTIFACTS.md) (Option A). Without these secrets (or equivalent credentials for your own registry), the Docker image pull will fail and PR/MR validation will not run.
 
