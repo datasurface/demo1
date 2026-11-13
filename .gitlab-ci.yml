@@ -15,7 +15,7 @@ datasurface-mr-validator:
     DOCKER_TLS_CERTDIR: ""
     GIT_STRATEGY: none
     GITLAB_CLONE_HOST: gitlab.local
-    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.51.3
+    DATASURFACE_IMAGE: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.52.5
     HEAD_REPOSITORY: http://gitlab.local/$CI_MERGE_REQUEST_SOURCE_PROJECT_PATH
     HEAD_BRANCH: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
     GITLAB_URL: http://gitlab.local
@@ -25,11 +25,28 @@ datasurface-mr-validator:
     - git clone --depth 1 --branch "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" "http://oauth2:${GITLAB_REPO_TOKEN}@${GITLAB_CLONE_HOST}/${CI_MERGE_REQUEST_SOURCE_PROJECT_PATH}.git" /tmp/mr
     - test -f /tmp/main/eco.py
     - test -f /tmp/mr/eco.py
+    - apk add --no-cache curl jq
     - printf '%s' "$GITLAB_ACCESS_TOKEN" | docker login registry.gitlab.com --username "$GITLAB_USERNAME" --password-stdin
   script:
     - |
       ALLOW_BREAKS=""
       if echo "$CI_MERGE_REQUEST_LABELS" | tr ',' '\n' | grep -qx 'breaking-change-approved'; then
+        # The label alone does not allow a breaking change: someone other than the MR author must
+        # also have approved the MR. GITLAB_API_TOKEN needs the read_api scope on this project.
+        # GitLab does not rerun the pipeline on approval: approve, then run a new pipeline.
+        MR_JSON=$(curl --fail --silent --show-error \
+          --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+          "$CI_API_V4_URL/projects/$CI_MERGE_REQUEST_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID") || exit 1
+        APPROVALS_JSON=$(curl --fail --silent --show-error \
+          --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+          "$CI_API_V4_URL/projects/$CI_MERGE_REQUEST_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/approvals") || exit 1
+        MR_AUTHOR=$(echo "$MR_JSON" | jq -r '.author.username')
+        NON_AUTHOR_APPROVALS=$(echo "$APPROVALS_JSON" | jq --arg author "$MR_AUTHOR" \
+          '[.approved_by[].user.username | select(. != $author)] | length')
+        if [ "$NON_AUTHOR_APPROVALS" -lt 1 ]; then
+          echo "breaking-change-approved requires an approval from someone other than the MR author ($MR_AUTHOR)" >&2
+          exit 1
+        fi
         ALLOW_BREAKS="--allow-breaking-changes"
       fi
       CID=$(docker create \

@@ -93,7 +93,7 @@ Recreate the registry Secret with `setup-k8s-registry-secret` when authenticatio
 Confirm the exact pinned image exists:
 
 ```bash
-export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.51.3"
+export IMAGE="registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.52.5"
 printf '%s' "$GITLAB_CUSTOMER_TOKEN" |
   docker login registry.gitlab.com \
     --username "$GITLAB_CUSTOMER_USER" --password-stdin

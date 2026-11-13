@@ -87,7 +87,7 @@ spec:
     - name: datasurface-registry
   containers:
     - name: datasurface
-      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.51.3
+      image: registry.gitlab.com/datasurface-inc/datasurface/datasurface:v1.52.5
 ```
 
 ## Using in Helm Charts
@@ -100,7 +100,7 @@ imagePullSecrets:
 
 image:
   repository: registry.gitlab.com/datasurface-inc/datasurface/datasurface
-  tag: v1.51.3
+  tag: v1.52.5
 ```
 
 ## Updating the Secret
